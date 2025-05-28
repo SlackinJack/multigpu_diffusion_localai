@@ -1,0 +1,28 @@
+{
+    "global": {
+        "cuda_devices": "",
+        "host_init_timeout": 180,
+        "port": 6000,
+        "master_port": 29400,
+        "grpc_port": 50050,
+        "use_compel": true,
+        "warm_up_steps": 40
+    },
+    "asyncdiff": {
+        "chunk_size": 8,
+        "motion_bucket_id": 180,
+        "noise_aug_strength": 0.01,
+        "frames": 25,
+        "time_shift": true,
+        "scale_percentage": 100,
+        "controlnet_scale": 1.0,
+        "video_output_type": "gif"
+    },
+    "distrifuser": {
+        "sync_mode": "corrected_async_gn",
+        "parallelism": "patch",
+        "split_scheme": "row",
+        "no_split_batch": false,
+        "no_cuda_graph": true
+    }
+}
