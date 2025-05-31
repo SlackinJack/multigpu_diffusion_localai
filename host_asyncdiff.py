@@ -1,6 +1,5 @@
 import argparse
 import base64
-import io
 import json
 import logging
 import os
@@ -10,95 +9,32 @@ import time
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
-
 from compel import Compel, ReturnedEmbeddingsType
+from diffusers import (
+    AnimateDiffControlNetPipeline, AnimateDiffPipeline, ControlNetModel, MotionAdapter,
+    StableDiffusion3ControlNetPipeline, StableDiffusion3Pipeline, StableDiffusionControlNetPipeline,
+    StableDiffusionPipeline, StableDiffusionUpscalePipeline, StableDiffusionXLControlNetPipeline,
+    StableDiffusionXLPipeline, StableVideoDiffusionPipeline,
+)
+from diffusers.utils import load_image
 from flask import Flask, request, jsonify
 from PIL import Image
 
 from AsyncDiff.asyncdiff.async_animate import AsyncDiff as AsyncDiffAD
 from AsyncDiff.asyncdiff.async_sd import AsyncDiff as AsyncDiffSD
-from diffusers import (
-    AnimateDiffControlNetPipeline,
-    AnimateDiffPipeline,
-    ControlNetModel,
-    MotionAdapter,
-    StableDiffusion3ControlNetPipeline,
-    StableDiffusion3Pipeline,
-    StableDiffusionControlNetPipeline,
-    StableDiffusionPipeline,
-    StableDiffusionUpscalePipeline,
-    StableDiffusionXLControlNetPipeline,
-    StableDiffusionXLPipeline,
-    StableVideoDiffusionPipeline,
-)
-from diffusers.utils import load_image, export_to_video, export_to_gif
-from diffusers.schedulers import (
-    DDIMScheduler,
-    DPMSolverMultistepScheduler,
-    DPMSolverSinglestepScheduler,
-    EulerAncestralDiscreteScheduler,
-    EulerDiscreteScheduler,
-    HeunDiscreteScheduler,
-    LMSDiscreteScheduler,
-    KDPM2AncestralDiscreteScheduler,
-    KDPM2DiscreteScheduler,
-    PNDMScheduler,
-    UniPCMultistepScheduler,
-)
 
 from modules.custom_lora_loader import convert_name_to_bin, merge_weight
+from modules.scheduler_config import get_scheduler
 
 app = Flask(__name__)
-
-os.environ["NCCL_BLOCKING_WAIT"] = "1"
-os.environ["NCCL_ASYNC_ERROR_HANDLING"] = "1"
-
-pipe = None
+async_diff = None
+initialized = False
 local_rank = None
 logger = None
-initialized = False
-async_diff = None
+pipe = None
 
 
-def get_scheduler(scheduler_name, current_scheduler_config):
-    scheduler_config = get_scheduler_config(scheduler_name, current_scheduler_config)
-    scheduler_class = get_scheduler_class(scheduler_name)
-    return scheduler_class.from_config(scheduler_config)
-
-
-def get_scheduler_class(scheduler_name):
-    name = scheduler_name.replace("k_", "", 1)
-    match name:
-        case "ddim":            return DDIMScheduler
-        case "euler":           return EulerDiscreteScheduler
-        case "euler_a":         return EulerAncestralDiscreteScheduler
-        case "dpm_2":           return KDPM2DiscreteScheduler
-        case "dpm_2_a":         return KDPM2AncestralDiscreteScheduler
-        case "dpmpp_2m":        return DPMSolverMultistepScheduler
-        case "dpmpp_2m_sde":    return DPMSolverMultistepScheduler
-        case "dpmpp_sde":       return DPMSolverSinglestepScheduler
-        case "heun":            return HeunDiscreteScheduler
-        case "lms":             return LMSDiscreteScheduler
-        case "pndm":            return PNDMScheduler
-        case "unipc":           return UniPCMultistepScheduler
-        case _:                 raise NotImplementedError
-
-
-def get_scheduler_config(scheduler_name, current_scheduler_config):
-    name = scheduler_name
-    if name.startswith("k_"):
-        current_scheduler_config["use_karras_sigmas"] = True
-        name = scheduler_name.replace("k_", "", 1)
-    match name:
-        case "dpmpp_2m":
-            current_scheduler_config["algorithm_type"] = "dpmsolver++"
-            current_scheduler_config["solver_order"] = 2
-        case "dpmpp_2m_sde":
-            current_scheduler_config["algorithm_type"] = "sde-dpmsolver++"
-    return current_scheduler_config
-
-
-def get_args() -> argparse.Namespace:
+def get_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", type=str, default=None)
     parser.add_argument("--seed", type=int, default=20)
@@ -131,51 +67,17 @@ def get_args() -> argparse.Namespace:
 
 
 def setup_logger():
-    global logger
-    global local_rank
-    logging.basicConfig(
-        level=logging.INFO,
-        format=f"[Rank {local_rank}] %(asctime)s - %(levelname)s - %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
+    global local_rank, logger
+    logging.root.setLevel(logging.NOTSET)
+    logging.basicConfig(level=logging.INFO, format=f"[Rank {local_rank}] %(asctime)s - %(levelname)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
     logger = logging.getLogger(__name__)
 
 
 @app.route("/initialize", methods=["GET"])
 def check_initialize():
     global initialized
-    if initialized:
-        return jsonify({"status": "initialized"}), 200
-    else:
-        return jsonify({"status": "initializing"}), 202
-
-
-# https://github.com/haofanwang/Lora-for-Diffusers/blob/18adfa4da0afec46679eb567d5a3690fd6a4ce9c/format_convert.py
-def convert_name_to_bin(name):
-    new_name = name.replace('lora_unet' + '_', '')
-    new_name = new_name.replace('.weight', '')
-    parts = new_name.split('.')
-
-    #parts[0] = parts[0].replace('_0', '')
-    if 'out' in parts[0]:
-        parts[0] = "_".join(parts[0].split('_')[:-1])
-
-    parts[1] = parts[1].replace('_', '.')
-    sub_parts = parts[0].split('_')
-
-    new_sub_parts = ""
-    for i in range(len(sub_parts)):
-        if sub_parts[i] in ['block', 'blocks', 'attentions'] or sub_parts[i].isnumeric() or 'attn' in sub_parts[i]:
-            if 'attn' in sub_parts[i]:
-                new_sub_parts += sub_parts[i] + ".processor."
-            else:
-                new_sub_parts += sub_parts[i] + "."
-        else:
-            new_sub_parts += sub_parts[i] + "_"
-
-    new_sub_parts += parts[1]
-    new_name =  new_sub_parts + '.weight'
-    return new_name
+    if initialized: return jsonify({"status": "initialized"}), 200
+    else:           return jsonify({"status": "initializing"}), 202
 
 
 def initialize():
@@ -754,6 +656,4 @@ def run_host():
 
 if __name__ == "__main__":
     initialize()
-    logger.info(f"Process initialized. Rank: {dist.get_rank()}, Local Rank: {os.environ.get('LOCAL_RANK', 'Not Set')}")
-    logger.info(f"Available GPUs: {torch.cuda.device_count()}")
     run_host()

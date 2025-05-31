@@ -20,10 +20,18 @@ from pathlib import Path
 from PIL import Image
 
 
+os.environ["TORCH_NCCL_BLOCKING_WAIT"] = "1"
+os.environ["TORCH_NCCL_ASYNC_ERROR_HANDLING"] = "1"
+#os.environ["NCCL_SHM_DISABLE"] = "1"
+#os.environ["NCCL_DEBUG"] = "INFO"
+#os.environ["NCCL_P2P_DISABLE"] = "0"
+
+
 config = json.load(open("config.json"))
 config_global = config["global"]
 config_asyncdiff = config["asyncdiff"]
 config_distrifuser = config["distrifuser"]
+config_xdit = config["xdit"]
 if len(config_global["cuda_devices"]) > 0:
     os.environ["CUDA_VISIBLE_DEVICES"] = config_global["cuda_devices"]
 URL = f'http://localhost:{config_global["port"]}'
@@ -92,7 +100,7 @@ class BackendServicer(backend_pb2_grpc.BackendServicer):
             if self.process_type != 1:
                 self.log_reload_reason(f"Host type changed to DistriFuser with {self.nproc_per_node} GPUs")
                 self.process_type = 1
-        elif self.pipeline_type in ["flux"]:
+        elif self.pipeline_type in ["flux", "sd3"]:
             # xdit
             if self.process_type != 2:
                 self.log_reload_reason(f"Host type changed to xDiT with {self.nproc_per_node} GPUs")
@@ -267,9 +275,6 @@ class BackendServicer(backend_pb2_grpc.BackendServicer):
 
                 assert self.nproc_per_node > 1, "xDiT requires at least 2 GPUs."
                 """
-                    Ensure the following is true:
-                    (pipefusion * tensor * data * ulysses * ring) == nproc_per_node
-
                     Support for parallelism techniques (as per xDiT README, at the time of writing):
                         - Tensor Parallel:
                             - StepVideo
@@ -287,40 +292,16 @@ class BackendServicer(backend_pb2_grpc.BackendServicer):
                             - SD3
                             - SDXL
                 """
-                additional_args = []
-                match self.nproc_per_node:
-                    case 2:
-                        # no cfg parallel
-                        if self.pipeline_type in ["flux"]:
-                            pipefusion_parallel_degree = 2
-                            tensor_parallel_degree = 1
-                            data_parallel_degree = 1
-                            ulysses_degree = 1
-                            ring_degree = 1
-                        else:
-                            pipefusion_parallel_degree = 1
-                            tensor_parallel_degree = 1
-                            data_parallel_degree = 1
-                            ulysses_degree = 1
-                            ring_degree = 1
-                            additional_args.append("--use_cfg_parallel")
-                    case 4:
-                        # no cfg parallel
-                        if self.pipeline_type in ["flux"]:
-                            pipefusion_parallel_degree = 2
-                            tensor_parallel_degree = 1
-                            data_parallel_degree = 1
-                            ulysses_degree = 2
-                            ring_degree = 1
-                        else:
-                            pipefusion_parallel_degree = 2
-                            tensor_parallel_degree = 1
-                            data_parallel_degree = 1
-                            ulysses_degree = 1
-                            ring_degree = 1
-                            additional_args.append("--use_cfg_parallel")
-                    case _:
-                        assert False, "You must manually add your configuration in backend.py as it is currently unsupported."
+
+                pf_deg = config_xdit["pipefusion_parallel_degree"]
+                tp_deg = config_xdit["tensor_parallel_degree"]
+                dp_deg = config_xdit["data_parallel_degree"]
+                u_deg = config_xdit["ulysses_degree"]
+                r_deg = config_xdit["ring_degree"]
+                cfg_parallel = 2 if config_xdit["use_cfg_parallel"] else 1
+
+                test_product = pf_deg * tp_deg * dp_deg * u_deg * r_deg * cfg_parallel
+                assert test_product == self.nproc_per_node, "pipefusion * tensor * data * ulysses * ring * (cfg ? 2 : 1) must equal nproc_per_node."
 
                 cmd = [
                     'torchrun',
@@ -334,21 +315,31 @@ class BackendServicer(backend_pb2_grpc.BackendServicer):
                     f'--variant={self.variant}',
                     f'--height={self.height}',
                     f'--width={self.width}',
+                    f'--pipefusion_parallel_degree={pf_deg}',
+                    f'--tensor_parallel_degree={tp_deg}',
+                    f'--data_parallel_degree={dp_deg}',
+                    f'--ulysses_degree={u_deg}',
+                    f'--ring_degree={r_deg}',
+                    '--no_use_resolution_binning',
                 ]
 
-                for arg in additional_args:
-                    cmd.append(arg)
+                if config_xdit["use_cfg_parallel"]:
+                    cmd.append("--use_cfg_parallel")
 
                 if self.low_vram:
-                    # cmd.append('--enable_model_cpu_offload')          # breaks parallelism
-                    # cmd.append('--enable_sequential_cpu_offload')     # crash
-                    cmd.append('--enable_tiling')
-                    cmd.append('--enable_slicing')
+                    #cmd.append('--enable_model_cpu_offload')
+                    #cmd.append('--enable_sequential_cpu_offload')
+                    #cmd.append('--enable_tiling')
+                    #cmd.append('--enable_slicing')
                     cmd.append('--xformers_efficient')
+
+                if config_xdit["quantize_encoder"]:
+                    cmd.append("--quantize_encoder")
+                    cmd.append(f'--quantize_encoder_type={config_xdit["quantize_encoder_type"]}')
 
             cmd.append(f'--warm_up_steps={config_global["warm_up_steps"]}')
 
-            if config_global["use_compel"]:
+            if config_global["use_compel"] and self.process_type != 2:
                 cmd.append('--compel')
 
             if len(self.loras) > 0:
@@ -361,7 +352,7 @@ class BackendServicer(backend_pb2_grpc.BackendServicer):
 
             global process
             logger.info("Starting torch instance:\n" + str(cmd))
-            process = subprocess.Popen(cmd)
+            process = subprocess.Popen(cmd, stdout=sys.stdout, stderr=subprocess.STDOUT)
             initialize_url = f"{URL}/initialize"
             time_elapsed = 0
             while True:
@@ -402,6 +393,7 @@ class BackendServicer(backend_pb2_grpc.BackendServicer):
                     "num_frames": config_asyncdiff["frames"],
                     "motion_bucket_id": config_asyncdiff["motion_bucket_id"],
                     "noise_aug_strength": config_asyncdiff["noise_aug_strength"],
+                    "output_path": request.dst,
                 }
 
                 if request.positive_prompt and len(request.positive_prompt) > 0:
@@ -411,11 +403,12 @@ class BackendServicer(backend_pb2_grpc.BackendServicer):
                 data = {
                     "positive_prompt": request.positive_prompt,
                     "num_inference_steps": request.step,
+                    "width": self.width,
+                    "height": self.height,
                     "seed": request.seed,
                     "cfg": self.cfg_scale,
                     "clip_skip": self.clip_skip,
-                    "width": self.width,
-                    "height": self.height,
+                    "output_path": request.dst,
                 }
 
             if request.negative_prompt and len(request.negative_prompt) > 0:
@@ -427,7 +420,7 @@ class BackendServicer(backend_pb2_grpc.BackendServicer):
                 response_data = response.json()
             except:
                 kill_process()
-                self.log_reload_reason("Invalid or no response from host")
+                self.log_reload_reason("Invalid or no response from host (Failed to send request/parse response)")
                 return backend_pb2.Result(message="No image generated", success=False)
 
             output_base64 = response_data.get("output")
@@ -436,23 +429,27 @@ class BackendServicer(backend_pb2_grpc.BackendServicer):
                 output = pickle.loads(output_bytes)
             else:
                 kill_process()
-                self.log_reload_reason("Invalid or no response from host")
+                self.log_reload_reason("Invalid or no response from host (No image received)")
                 return backend_pb2.Result(message="No image generated", success=False)
-            if response_data.get("is_image"):
-                output.save(request.dst)
-            else:
-                if config_asyncdiff["video_output_type"].lower() == "mp4":
-                    file_name = request.dst.replace(".png", ".mp4")
-                    logger.info("Exporting frames to MP4")
-                    export_to_video(output, file_name, fps=7)
-                elif config_asyncdiff["video_output_type"].lower() == "gif":
-                    file_name = request.dst.replace(".png", ".gif")
-                    logger.info("Exporting frames to GIF")
-                    export_to_gif(output, file_name)
+
+            if output is not None:
+                if response_data.get("is_image"):
+                    output.save(request.dst)
                 else:
-                    logger.info("Unsupported or no media type given")
-                    return backend_pb2.Result(message="Media created but not saved", success=True)
-            return backend_pb2.Result(message="Media generated", success=True)
+                    if config_asyncdiff["video_output_type"].lower() == "mp4":
+                        file_name = request.dst.replace(".png", ".mp4")
+                        logger.info("Exporting frames to MP4")
+                        export_to_video(output, file_name, fps=7)
+                    elif config_asyncdiff["video_output_type"].lower() == "gif":
+                        file_name = request.dst.replace(".png", ".gif")
+                        logger.info("Exporting frames to GIF")
+                        export_to_gif(output, file_name)
+                    else:
+                        logger.info("Unsupported or no media type given")
+                        return backend_pb2.Result(message="Media created but not saved", success=True)
+                return backend_pb2.Result(message="Media generated", success=True)
+            else:
+                return backend_pb2.Result(message="No image generated", success=False)
         else:
             return backend_pb2.Result(message="Host is not loaded", success=False)
 

@@ -38,5 +38,45 @@ patches_wildcard = [
     },
 ]
 
-FilePatcher.patch_wildcard(root, target_type, patches_wildcard)
+patches = [
+    {
+        "file_name": f"{root}/core/long_ctx_attention/ring/ring_flash_attn.py",
+        "replace": [
+            # Quick & dirty fix for disabling flash_attn when it isn't supported
+            # maybe I'll do a PR later, maybe I'll forget, but for now it just works.
+            {
+                "from": """
+            block_out, block_lse = fn(
+                q,
+                key,
+                value,
+                dropout_p=dropout_p,
+                softmax_scale=softmax_scale,
+                causal=causal and step == 0,
+                window_size=window_size,
+                softcap=0.0,
+                alibi_slopes=alibi_slopes,
+                return_softmax=True and dropout_p > 0,
+            )""",
+                "to": """
+            global flash_attn
+            block_out, block_lse = fn(
+                q,
+                key,
+                value,
+                dropout_p=dropout_p,
+                softmax_scale=softmax_scale,
+                causal=causal and step == 0,
+                window_size=window_size,
+                softcap=0.0,
+                alibi_slopes=alibi_slopes,
+                return_softmax=True and dropout_p > 0,
+                op_type="efficient" if flash_attn is None else "flash",
+            )"""
+            }
+        ]
+    }
+]
 
+FilePatcher.patch_wildcard(root, target_type, patches_wildcard)
+FilePatcher.patch(patches)

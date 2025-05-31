@@ -1,7 +1,7 @@
 {
     "global": {
         "cuda_devices": "",
-        "host_init_timeout": 180,
+        "host_init_timeout": 600,
         "port": 6000,
         "master_port": 29400,
         "grpc_port": 50050,
@@ -24,5 +24,15 @@
         "split_scheme": "row",
         "no_split_batch": false,
         "no_cuda_graph": true
+    },
+    "xdit": {
+        "pipefusion_parallel_degree": 4,
+        "tensor_parallel_degree": 1,
+        "data_parallel_degree": 1,
+        "ulysses_degree": 1,
+        "ring_degree": 1,
+        "use_cfg_parallel": false,
+        "quantize_encoder": true,
+        "quantize_encoder_type": "qint8"
     }
 }

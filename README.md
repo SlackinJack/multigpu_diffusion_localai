@@ -14,10 +14,11 @@ A custom LocalAI backend comprised of various multi-GPU Diffusion solutions.
 ## Currently Supported Models:
 - Stable Diffusion 1.5 (sd1) (AsyncDiff or DistriFuser)
 - Stable Diffusion 2 (sd2) (AsyncDiff or DistriFuser)
-- Stable Diffusion 3 (sd3) (AsyncDiff)
+- Stable Diffusion 3 (sd3) (AsyncDiff or xDiT)
 - Stable Diffusion XL (sdxl) (AsyncDiff or DistriFuser)
 - Stable Diffusion Upscaler (sdup) (AsyncDiff)
 - Stable Video Diffusion (svd) (AsyncDiff)
+- FLUX.1 (flux) (xDiT)
 
 ## Read More:
 - [AsyncDiff](https://github.com/czg1225/AsyncDiff).

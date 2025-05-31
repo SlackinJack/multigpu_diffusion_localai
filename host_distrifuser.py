@@ -1,89 +1,32 @@
 import argparse
+import base64
+import json
+import logging
 import os
+import pickle
+import safetensors
 import time
 import torch
 import torch.distributed as dist
-import pickle
-import json
-import logging
-import base64
 import torch.multiprocessing as mp
-import safetensors
-
 from compel import Compel, ReturnedEmbeddingsType
-from PIL import Image
 from flask import Flask, request, jsonify
+from PIL import Image
 
 from DistriFuser.distrifuser.utils import DistriConfig
 from DistriFuser.distrifuser.pipelines import DistriSDPipeline, DistriSDXLPipeline
-from diffusers.schedulers import (
-    DDIMScheduler,
-    DPMSolverMultistepScheduler,
-    DPMSolverSinglestepScheduler,
-    EulerAncestralDiscreteScheduler,
-    EulerDiscreteScheduler,
-    HeunDiscreteScheduler,
-    LMSDiscreteScheduler,
-    KDPM2AncestralDiscreteScheduler,
-    KDPM2DiscreteScheduler,
-    PNDMScheduler,
-    UniPCMultistepScheduler,
-)
 
 from modules.custom_lora_loader import convert_name_to_bin, merge_weight
+from modules.scheduler_config import get_scheduler
 
 app = Flask(__name__)
-
-os.environ["NCCL_BLOCKING_WAIT"] = "1"
-os.environ["NCCL_ASYNC_ERROR_HANDLING"] = "1"
-
-pipe = None
-engine_config = None
-input_config = None
+initialized = False
 local_rank = None
 logger = None
-initialized = False
+pipe = None
 
 
-def get_scheduler(scheduler_name, current_scheduler_config):
-    scheduler_config = get_scheduler_config(scheduler_name, current_scheduler_config)
-    scheduler_class = get_scheduler_class(scheduler_name)
-    return scheduler_class.from_config(scheduler_config)
-
-
-def get_scheduler_class(scheduler_name):
-    name = scheduler_name.replace("k_", "", 1)
-    match name:
-        case "ddim":            return DDIMScheduler
-        case "euler":           return EulerDiscreteScheduler
-        case "euler_a":         return EulerAncestralDiscreteScheduler
-        case "dpm_2":           return KDPM2DiscreteScheduler
-        case "dpm_2_a":         return KDPM2AncestralDiscreteScheduler
-        case "dpmpp_2m":        return DPMSolverMultistepScheduler
-        case "dpmpp_2m_sde":    return DPMSolverMultistepScheduler
-        case "dpmpp_sde":       return DPMSolverSinglestepScheduler
-        case "heun":            return HeunDiscreteScheduler
-        case "lms":             return LMSDiscreteScheduler
-        case "pndm":            return PNDMScheduler
-        case "unipc":           return UniPCMultistepScheduler
-        case _:                 raise NotImplementedError
-
-
-def get_scheduler_config(scheduler_name, current_scheduler_config):
-    name = scheduler_name
-    if name.startswith("k_"):
-        current_scheduler_config["use_karras_sigmas"] = True
-        name = scheduler_name.replace("k_", "", 1)
-    match name:
-        case "dpmpp_2m":
-            current_scheduler_config["algorithm_type"] = "dpmsolver++"
-            current_scheduler_config["solver_order"] = 2
-        case "dpmpp_2m_sde":
-            current_scheduler_config["algorithm_type"] = "sde-dpmsolver++"
-    return current_scheduler_config
-
-
-def get_args() -> argparse.Namespace:
+def get_args():
     parser = argparse.ArgumentParser()
 
     # Diffuser specific arguments
@@ -116,27 +59,21 @@ def get_args() -> argparse.Namespace:
 
 
 def setup_logger():
-    global logger
-    global local_rank
-    logging.basicConfig(
-        level=logging.INFO,
-        format=f"[Rank {local_rank}] %(asctime)s - %(levelname)s - %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
+    global local_rank, logger
+    logging.root.setLevel(logging.NOTSET)
+    logging.basicConfig(level=logging.INFO, format=f"[Rank {local_rank}] %(asctime)s - %(levelname)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
     logger = logging.getLogger(__name__)
 
 
 @app.route("/initialize", methods=["GET"])
 def check_initialize():
     global initialized
-    if initialized:
-        return jsonify({"status": "initialized"}), 200
-    else:
-        return jsonify({"status": "initializing"}), 202
+    if initialized: return jsonify({"status": "initialized"}), 200
+    else:           return jsonify({"status": "initializing"}), 202
 
 
 def initialize():
-    global pipe, engine_config, input_config, local_rank, initialized
+    global pipe, local_rank, initialized
     mp.set_start_method("spawn", force=True)
 
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
@@ -175,6 +112,7 @@ def initialize():
         distri_config=distri_config,
         torch_dtype=torch_dtype,
         use_safetensors=True,
+        local_files_only=True,
     )
 
     pipe.pipeline.scheduler = get_scheduler(args.scheduler, pipe.pipeline.scheduler.config)
@@ -228,7 +166,7 @@ def generate_image_parallel(
     cfg,
     clip_skip
 ):
-    global pipe, local_rank, input_config
+    global pipe, local_rank
     logger.info(
         "Active request parameters:\n"
         f"positive_prompt={positive_prompt}\n"
@@ -365,6 +303,4 @@ def run_host():
 
 if __name__ == "__main__":
     initialize()
-    logger.info(f"Process initialized. Rank: {dist.get_rank()}, Local Rank: {os.environ.get('LOCAL_RANK', 'Not Set')}")
-    logger.info(f"Available GPUs: {torch.cuda.device_count()}")
     run_host()
