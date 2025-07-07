@@ -22,6 +22,15 @@ patches = [
                 "from": "from distrifuser.modules",
                 "to":   "from ..modules",
             },
+            {
+                "from": "super(DistriUNetPP, self).__init__(model, distri_config)",
+                "to": """super(DistriUNetPP, self).__init__(model, distri_config)
+
+
+    def load_lora_adapter(self, pretrained_model_name_or_path_or_dict, **kwargs):
+        return self.model.load_lora_adapter(pretrained_model_name_or_path_or_dict=pretrained_model_name_or_path_or_dict, **kwargs)
+""",
+            },
         ],
     },
     {
@@ -30,6 +39,15 @@ patches = [
             {
                 "from": "from distrifuser.modules",
                 "to":   "from ..modules",
+            },
+            {
+                "from": "super(DistriUNetTP, self).__init__(model, distri_config)",
+                "to": """super(DistriUNetTP, self).__init__(model, distri_config)
+
+
+    def load_lora_adapter(self, pretrained_model_name_or_path_or_dict, **kwargs):
+        return self.model.load_lora_adapter(pretrained_model_name_or_path_or_dict=pretrained_model_name_or_path_or_dict, **kwargs)
+""",
             },
         ],
     },

@@ -16,7 +16,6 @@ from PIL import Image
 from DistriFuser.distrifuser.utils import DistriConfig
 from DistriFuser.distrifuser.pipelines import DistriSDPipeline, DistriSDXLPipeline
 
-from modules.custom_lora_loader import convert_name_to_bin, merge_weight
 from modules.scheduler_config import get_scheduler
 
 app = Flask(__name__)
@@ -120,24 +119,20 @@ def initialize():
     if args.lora:
         pipe.pipeline.unet.model.enable_lora()
         loras = json.loads(args.lora)
-        merged_weights = {}
+        weight_names = []
         i = 0
 
         for adapter, scale in loras.items():
             if adapter.endswith(".safetensors"):
-                safe_dict = safetensors.torch.load_file(adapter, device=f'cuda:{local_rank}')
-                for k in safe_dict:
-                    if ('text' in k) or ('unet' not in k) or ('transformer_blocks' not in k) or ('ff_net' in k) or ('alpha' in k):
-                        continue
-                    merged_weights = merge_weight(local_rank, merged_weights, convert_name_to_bin(k), safe_dict[k], scale, len(loras))
+                weights = safetensors.torch.load_file(adapter, device=f'cuda:{local_rank}')
             else:
-                f = torch.load(adapter, weights_only=True, map_location=torch.device(f'cuda:{local_rank}'))
-                for k in f.keys():
-                    merged_weights = merge_weight(local_rank, merged_weights, k, f[k], scale, len(loras))
+                weights = torch.load(adapter, map_location=torch.device(f'cuda:{local_rank}'))
+            weight_names.append(str(i))
+            pipe.pipeline.load_lora_weights(weights, weight_name=str(i))
             logger.info(f"Added LoRA[{i}], scale={scale}: {adapter}")
             i += 1
 
-        pipe.pipeline.unet.model.load_attn_procs(merged_weights)
+        pipe.pipeline.unet.model.set_adapters(weight_names, list(loras.values()))
         logger.info(f'Total loaded LoRAs: {i}')
 
     if args.enable_slicing:
