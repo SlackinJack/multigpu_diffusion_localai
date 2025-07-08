@@ -29,6 +29,10 @@ patches = [
 
     def load_lora_adapter(self, pretrained_model_name_or_path_or_dict, **kwargs):
         return self.model.load_lora_adapter(pretrained_model_name_or_path_or_dict=pretrained_model_name_or_path_or_dict, **kwargs)
+
+
+    def set_adapters(self, adapter_names, weights):
+        return self.model.set_adapters(adapter_names=adapter_names, weights=weights)
 """,
             },
         ],
@@ -47,6 +51,10 @@ patches = [
 
     def load_lora_adapter(self, pretrained_model_name_or_path_or_dict, **kwargs):
         return self.model.load_lora_adapter(pretrained_model_name_or_path_or_dict=pretrained_model_name_or_path_or_dict, **kwargs)
+
+
+    def set_adapters(self, adapter_names, weights):
+        return self.model.set_adapters(adapter_names=adapter_names, weights=weights)
 """,
             },
         ],

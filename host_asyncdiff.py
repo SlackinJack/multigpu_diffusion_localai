@@ -237,9 +237,8 @@ def initialize():
     )
 
     if args.lora is not None and args.pipeline_type in ["sd1", "sd2", "sd3", "sdxl"]:
-        pipe.unet.enable_lora()
         loras = json.loads(args.lora)
-        weight_names = []
+        adapter_names = []
         i = 0
 
         for adapter, scale in loras.items():
@@ -247,12 +246,14 @@ def initialize():
                 weights = safetensors.torch.load_file(adapter, device=f'cuda:{local_rank}')
             else:
                 weights = torch.load(adapter, map_location=torch.device(f'cuda:{local_rank}'))
-            weight_names.append(str(i))
-            pipe.load_lora_weights(weights, weight_name=str(i))
+            adapter_names.append(str(i))
+            pipe.load_lora_weights(weights, weight_name=adapter.split("/")[-1], adapter_name=str(i))
             logger.info(f"Added LoRA[{i}], scale={scale}: {adapter}")
             i += 1
 
-        pipe.unet.set_adapters(weight_names, list(loras.values()))
+        pipe.set_adapters(adapter_names, list(loras.values()))
+        pipe.unet.model.enable_adapters()
+        pipe.text_encoder.enable_adapters()
         logger.info(f'Total loaded LoRAs: {i}')
 
     # memory saving functions

@@ -117,9 +117,8 @@ def initialize():
     pipe.pipeline.scheduler = get_scheduler(args.scheduler, pipe.pipeline.scheduler.config)
 
     if args.lora:
-        pipe.pipeline.unet.model.enable_lora()
         loras = json.loads(args.lora)
-        weight_names = []
+        adapter_names = []
         i = 0
 
         for adapter, scale in loras.items():
@@ -127,12 +126,14 @@ def initialize():
                 weights = safetensors.torch.load_file(adapter, device=f'cuda:{local_rank}')
             else:
                 weights = torch.load(adapter, map_location=torch.device(f'cuda:{local_rank}'))
-            weight_names.append(str(i))
-            pipe.pipeline.load_lora_weights(weights, weight_name=str(i))
+            adapter_names.append(str(i))
+            pipe.pipeline.load_lora_weights(weights, weight_name=adapter.split("/")[-1], adapter_name=str(i))
             logger.info(f"Added LoRA[{i}], scale={scale}: {adapter}")
             i += 1
 
-        pipe.pipeline.unet.model.set_adapters(weight_names, list(loras.values()))
+        pipe.pipeline.set_adapters(adapter_names, list(loras.values()))
+        pipe.pipeline.unet.model.enable_adapters()
+        pipe.pipeline.text_encoder.enable_adapters()
         logger.info(f'Total loaded LoRAs: {i}')
 
     if args.enable_slicing:
