@@ -389,6 +389,7 @@ class BackendServicer(backend_pb2_grpc.BackendServicer):
                     "height": self.height,
                     "num_inference_steps": request.step,
                     "seed": request.seed,
+                    "cfg": self.cfg_scale,
                     "decode_chunk_size": decode_chunk_size,
                     "num_frames": config_asyncdiff["frames"],
                     "motion_bucket_id": config_asyncdiff["motion_bucket_id"],

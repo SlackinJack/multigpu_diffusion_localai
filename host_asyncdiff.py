@@ -254,10 +254,15 @@ def initialize():
             i += 1
 
         pipe.unet.set_adapters(adapter_names, list(loras.values()))
-        pipe.text_encoder.enable_adapters()
+        #pipe.text_encoder.enable_adapters()
         logger.info(f'Total loaded LoRAs: {i}')
         logger.info(f'UNet Adapters: {str(pipe.unet.active_adapters())}')
-        logger.info(f'TextEncoder Adapters: {str(pipe.text_encoder.active_adapters())}')
+        pipe.unet.fuse_lora(adapter_names=adapter_names, lora_scale=1.0)
+        pipe.unload_lora_weights()
+        pipe.unet.to(memory_format=torch.channels_last)
+        pipe.unet = torch.compile(pipe.unet, mode="reduce-overhead", fullgraph=True)
+        logger.info(f'LoRAs have been compiled into UNet')
+        #logger.info(f'TextEncoder Adapters: {str(pipe.text_encoder.active_adapters())}')
 
     # memory saving functions
     if not args.pipeline_type in ["svd"]:

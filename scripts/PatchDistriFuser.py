@@ -33,6 +33,10 @@ patches = [
 
     def set_adapters(self, adapter_names, weights):
         return self.model.set_adapters(adapter_names=adapter_names, weights=weights)
+
+
+    def unload_lora(self):
+        return self.model.unload_lora()
 """,
             },
         ],
@@ -55,6 +59,10 @@ patches = [
 
     def set_adapters(self, adapter_names, weights):
         return self.model.set_adapters(adapter_names=adapter_names, weights=weights)
+
+
+    def unload_lora(self):
+        return self.model.unload_lora()
 """,
             },
         ],

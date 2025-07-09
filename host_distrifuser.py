@@ -134,10 +134,15 @@ def initialize():
             i += 1
 
         pipe.pipeline.unet.model.set_adapters(adapter_names, list(loras.values()))
-        pipe.pipeline.text_encoder.enable_adapters()
+        #pipe.pipeline.text_encoder.enable_adapters()
         logger.info(f'Total loaded LoRAs: {i}')
         logger.info(f'UNet Adapters: {str(pipe.pipeline.unet.model.active_adapters())}')
-        logger.info(f'TextEncoder Adapters: {str(pipe.pipeline.text_encoder.active_adapters())}')
+        pipe.pipeline.unet.model.fuse_lora(adapter_names=adapter_names, lora_scale=1.0)
+        pipe.pipeline.unload_lora_weights()
+        pipe.pipeline.unet.model.to(memory_format=torch.channels_last)
+        pipe.pipeline.unet.model = torch.compile(pipe.pipeline.unet.model, mode="reduce-overhead", fullgraph=True)
+        logger.info(f'LoRAs have been compiled into UNet')
+        #logger.info(f'TextEncoder Adapters: {str(pipe.pipeline.text_encoder.active_adapters())}')
 
     if args.enable_slicing:
         pipe.pipeline.enable_vae_slicing()
