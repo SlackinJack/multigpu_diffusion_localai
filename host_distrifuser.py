@@ -126,15 +126,18 @@ def initialize():
                 weights = safetensors.torch.load_file(adapter, device=f'cuda:{local_rank}')
             else:
                 weights = torch.load(adapter, map_location=torch.device(f'cuda:{local_rank}'))
-            adapter_names.append(str(i))
-            pipe.pipeline.load_lora_weights(weights, weight_name=adapter.split("/")[-1], adapter_name=str(i))
+            weight_name = adapter.split("/")[-1]
+            adapter_name = weight_name if not "." in weight_name else weight_name.split(".")[0]
+            adapter_names.append(adapter_name)
+            pipe.pipeline.load_lora_weights(weights, weight_name=weight_name, adapter_name=adapter_name)
             logger.info(f"Added LoRA[{i}], scale={scale}: {adapter}")
             i += 1
 
-        pipe.pipeline.set_adapters(adapter_names, list(loras.values()))
-        pipe.pipeline.unet.model.enable_adapters()
+        pipe.pipeline.unet.model.set_adapters(adapter_names, list(loras.values()))
         pipe.pipeline.text_encoder.enable_adapters()
         logger.info(f'Total loaded LoRAs: {i}')
+        logger.info(f'UNet Adapters: {str(pipe.pipeline.unet.model.active_adapters())}')
+        logger.info(f'TextEncoder Adapters: {str(pipe.pipeline.text_encoder.active_adapters())}')
 
     if args.enable_slicing:
         pipe.pipeline.enable_vae_slicing()
