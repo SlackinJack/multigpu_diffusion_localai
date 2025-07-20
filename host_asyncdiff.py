@@ -11,10 +11,20 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 from compel import Compel, ReturnedEmbeddingsType
 from diffusers import (
-    AnimateDiffControlNetPipeline, AnimateDiffPipeline, ControlNetModel, MotionAdapter,
-    StableDiffusion3ControlNetPipeline, StableDiffusion3Pipeline, StableDiffusionControlNetPipeline,
-    StableDiffusionPipeline, StableDiffusionUpscalePipeline, StableDiffusionXLControlNetPipeline,
-    StableDiffusionXLPipeline, StableVideoDiffusionPipeline,
+    AnimateDiffControlNetPipeline,
+    AnimateDiffPipeline,
+    AutoencoderKL,
+    ControlNetModel,
+    MotionAdapter,
+    QuantoConfig,
+    StableDiffusion3ControlNetPipeline,
+    StableDiffusion3Pipeline,
+    StableDiffusionControlNetPipeline,
+    StableDiffusionPipeline,
+    StableDiffusionUpscalePipeline,
+    StableDiffusionXLControlNetPipeline,
+    StableDiffusionXLPipeline,
+    StableVideoDiffusionPipeline,
 )
 from diffusers.utils import load_image
 from flask import Flask, request, jsonify
@@ -23,6 +33,7 @@ from PIL import Image
 from AsyncDiff.asyncdiff.async_animate import AsyncDiff as AsyncDiffAD
 from AsyncDiff.asyncdiff.async_sd import AsyncDiff as AsyncDiffSD
 
+from modules.host_generics import *
 from modules.scheduler_config import get_scheduler
 
 app = Flask(__name__)
@@ -35,32 +46,14 @@ pipe = None
 
 def get_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", type=str, default=None)
-    parser.add_argument("--seed", type=int, default=20)
+    # asyncdiff
     parser.add_argument("--model_n", type=int, default=2, choices=[2, 3, 4])
     parser.add_argument("--stride", type=int, default=1, choices=[1, 2])
     parser.add_argument("--warm_up", type=int, default=3)
     parser.add_argument("--time_shift", type=bool, default=False)
-
-    # added args
-    parser.add_argument("--warm_up_steps", type=int, default=40)
-    parser.add_argument("--port", type=int, default=6000, help="Listening port number")
-    parser.add_argument("--pipeline_type", type=str, default=None, choices=["ad", "sd1", "sd2", "sd3", "sdup", "sdxl", "svd"])
-    parser.add_argument("--compel", action="store_true", help="Enable Compel")
-    parser.add_argument("--motion_adapter", type=str, default=None)
-    parser.add_argument("--variant", type=str, default="fp16", help="PyTorch variant [fp16/fp32]")
-    parser.add_argument("--scheduler", type=str, default=None)
-    parser.add_argument("--lora", type=str, default=None, help="A dictionary of LoRAs to load, with their weights")
-    parser.add_argument("--ip_adapter", type=str, default=None, help="IPAdapter model")
-    parser.add_argument("--ip_adapter_scale", type=float, default=1.0, help="IPAdapter scale")
-    parser.add_argument("--control_net", type=str, default=None, help="ControlNet model")
-    parser.add_argument("--enable_model_cpu_offload", action="store_true")
-    parser.add_argument("--enable_sequential_cpu_offload", action="store_true")
-    parser.add_argument("--enable_tiling", action="store_true")
-    parser.add_argument("--enable_slicing", action="store_true")
-    parser.add_argument("--xformers_efficient", action="store_true")
-    parser.add_argument("--scale_input", action="store_true")
-    parser.add_argument("--scale_percentage", type=float, default=100.0)
+    # generic
+    for k,v in GENERIC_HOST_ARGS.items():   parser.add_argument(f"--{k}", type=v, default=None)
+    for e in GENERIC_HOST_ARGS_TOGGLES:     parser.add_argument(f"--{e}", action="store_true")
     args = parser.parse_args()
     return args
 
@@ -75,21 +68,18 @@ def setup_logger():
 @app.route("/initialize", methods=["GET"])
 def check_initialize():
     global initialized
-    if initialized: return jsonify({"status": "initialized"}), 200
-    else:           return jsonify({"status": "initializing"}), 202
+    if initialized: return "", 200
+    else:           return "", 202
 
 
 def initialize():
+    global pipe, local_rank, async_diff, initialized
     args = get_args()
 
-    # asserts
-    assert args.model is not None, "You need to provide a model to load."
-    assert args.variant in ["fp16", "fp32"], f"Unsupported variant: {args.variant}"
-    assert args.pipeline_type is not None, "No pipeline type provided."
-    assert not (args.pipeline_type == "ad" and args.motion_adapter is None), "No motion adapter provided."
+    # checks
+    assert not (args.type == "ad" and args.motion_adapter is None), "AnimateDiff requires providing a motion adapter."
 
     # init distributed inference
-    global pipe, local_rank, async_diff, initialized
     mp.set_start_method("spawn", force=True)
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
     torch.cuda.set_device(local_rank)
@@ -97,11 +87,12 @@ def initialize():
     logger.info(f"Initializing model on GPU: {torch.cuda.current_device()}")
 
     # set torch type
-    match args.variant:
-        case "fp16":
-            torch_dtype = torch.float16
-        case _:
-            torch_dtype = torch.float32
+    torch_dtype = get_torch_type(args.variant)
+
+    # quantize
+    q_config = None
+    if args.quantize_encoder:
+        q_config = QuantoConfig(weights_dtype=args.quantize_encoder_type, activations_dtype=args.quantize_encoder_type)
 
     # set control net
     controlnet_model = None
@@ -112,10 +103,11 @@ def initialize():
             use_safetensors=True,
             local_files_only=True,
             low_cpu_mem_usage=True,
+            quantization_config=q_config,
         )
 
     # set pipeline
-    match args.pipeline_type:
+    match args.type:
         case "ad":
             adapter = MotionAdapter.from_pretrained(
                 args.motion_adapter,
@@ -123,58 +115,67 @@ def initialize():
                 use_safetensors=True,
                 local_files_only=True,
                 low_cpu_mem_usage=True,
+                quantization_config=q_config,
             )
             pipe_class = AnimateDiffControlNetPipeline if args.control_net is not None else AnimateDiffPipeline
             pipe = pipe_class.from_pretrained(
                 args.model,
                 motion_adapter=adapter,
-                torch_dtype=torch_dtype,
-                use_safetensors=True,
-                local_files_only=True,
                 controlnet=controlnet_model,
-            )
-            if args.ip_adapter is not None:
-                split = args.ip_adapter.split("/")
-                ip_adapter_file = split[-1]
-                ip_adapter_subfolder = split[-2]
-                ip_adapter_folder = args.ip_adapter.replace(f'/{ip_adapter_subfolder}/{ip_adapter_file}', "")
-                pipe.load_ip_adapter(
-                    ip_adapter_folder,
-                    subfolder=ip_adapter_subfolder,
-                    weight_name=ip_adapter_file,
-                    local_files_only=True,
-                    low_cpu_mem_usage=True,
-                )
-                pipe.set_ip_adapter_scale(args.ip_adapter_scale)
-        case "sd1":
-            pipe_class = StableDiffusionControlNetPipeline if args.control_net is not None else StableDiffusionPipeline
-            pipe = pipe_class.from_pretrained(
-                args.model,
                 torch_dtype=torch_dtype,
                 use_safetensors=True,
                 local_files_only=True,
                 low_cpu_mem_usage=True,
+                quantization_config=q_config,
+            )
+            if args.ip_adapter is not None:
+                ip_adapter = json.loads(args.ip_adapter)
+                for m,s in ip_adapter.items():
+                    split = m.split("/")
+                    ip_adapter_file = split[-1]
+                    ip_adapter_subfolder = split[-2]
+                    ip_adapter_folder = m.replace(f'/{ip_adapter_subfolder}/{ip_adapter_file}', "")
+                    pipe.load_ip_adapter(
+                        ip_adapter_folder,
+                        subfolder=ip_adapter_subfolder,
+                        weight_name=ip_adapter_file,
+                        local_files_only=True,
+                        low_cpu_mem_usage=True,
+                        quantization_config=q_config,
+                    )
+                    pipe.set_ip_adapter_scale(s)
+        case "sd1":
+            pipe_class = StableDiffusionControlNetPipeline if args.control_net is not None else StableDiffusionPipeline
+            pipe = pipe_class.from_pretrained(
+                args.model,
                 controlnet=controlnet_model,
+                torch_dtype=torch_dtype,
+                use_safetensors=True,
+                local_files_only=True,
+                low_cpu_mem_usage=True,
+                quantization_config=q_config,
             )
         case "sd2":
             pipe_class = StableDiffusionControlNetPipeline if args.control_net is not None else StableDiffusionPipeline
             pipe = pipe_class.from_pretrained(
                 args.model,
+                controlnet=controlnet_model,
                 torch_dtype=torch_dtype,
                 use_safetensors=True,
                 local_files_only=True,
                 low_cpu_mem_usage=True,
-                controlnet=controlnet_model,
+                quantization_config=q_config,
             )
         case "sd3":
             pipe_class = StableDiffusion3ControlNetPipeline if args.control_net is not None else StableDiffusion3Pipeline
             pipe = pipeline_class.from_pretrained(
                 args.model,
+                controlnet=controlnet_model,
                 torch_dtype=torch_dtype,
                 use_safetensors=True,
                 local_files_only=True,
                 low_cpu_mem_usage=True,
-                controlnet=controlnet_model,
+                quantization_config=q_config,
             )
         case "sdup":
             pipe = StableDiffusionUpscalePipeline.from_pretrained(
@@ -183,16 +184,18 @@ def initialize():
                 use_safetensors=True,
                 local_files_only=True,
                 low_cpu_mem_usage=True,
+                quantization_config=q_config,
             )
         case "sdxl":
             pipe_class = StableDiffusionXLControlNetPipeline if args.control_net is not None else StableDiffusionXLPipeline
             pipe = pipe_class.from_pretrained(
                 args.model,
+                controlnet=controlnet_model,
                 torch_dtype=torch_dtype,
                 use_safetensors=True,
                 local_files_only=True,
                 low_cpu_mem_usage=True,
-                controlnet=controlnet_model,
+                quantization_config=q_config,
             )
         case "svd":
             pipe = StableVideoDiffusionPipeline.from_pretrained(
@@ -201,81 +204,55 @@ def initialize():
                 use_safetensors=True,
                 local_files_only=True,
                 low_cpu_mem_usage=True,
+                quantization_config=q_config,
             )
         case _: raise NotImplementedError
 
-    # set scheduler
-    if args.pipeline_type in ["ad", "sd1", "sd2", "sd3", "sdup", "sdxl"]:
-        if args.scheduler is not None:
-            scheduler_config = {}
-            for k, v in pipe.scheduler.config.items():
-                scheduler_config[k] = v
-            pipe.scheduler = get_scheduler(args.scheduler, scheduler_config)
-        elif pipe.scheduler is None:
-            logger.info("No scheduler provided - using DDIM")
-            scheduler = DDIMScheduler.from_pretrained(
-                args.model,
-                subfolder="scheduler",
-                clip_sample=False,
-                timestep_spacing="linspace",
-                beta_schedule="linear",
-                steps_offset=1,
-                local_files_only=True,
-                low_cpu_mem_usage=True,
-            )
-            pipe.scheduler = scheduler
+    # memory saving functions
+    if not args.type in ["svd"]:
+        if args.enable_vae_slicing: pipe.enable_vae_slicing()
+        if args.enable_vae_tiling:  pipe.enable_vae_tiling()
+        if args.xformers_efficient: pipe.enable_xformers_memory_efficient_attention()
 
     # set asyncdiff
-    if args.pipeline_type in ["ad"]:    ad_class = AsyncDiffAD
-    else:                               ad_class = AsyncDiffSD
-    async_diff = ad_class(
-        pipe,
-        args.pipeline_type,
-        model_n=args.model_n,
-        stride=args.stride,
-        time_shift=args.time_shift,
-    )
+    if args.type in ["ad"]: ad_class = AsyncDiffAD
+    else:                   ad_class = AsyncDiffSD
+    async_diff = ad_class(pipe, args.type, model_n=args.model_n, stride=args.stride, time_shift=args.time_shift)
 
-    if args.lora is not None and args.pipeline_type in ["sd1", "sd2", "sd3", "sdxl"]:
-        loras = json.loads(args.lora)
-        adapter_names = []
-        i = 0
+    # set scheduler
+    if args.type in ["ad", "sd1", "sd2", "sd3", "sdup", "sdxl"]:
+        pipe.scheduler = get_scheduler(args.scheduler, pipe.scheduler.config)
+        #if args.scheduler is not None:
+        #    scheduler_config = {}
+        #    for k, v in pipe.scheduler.config.items():
+        #        scheduler_config[k] = v
+        #    pipe.scheduler = get_scheduler(args.scheduler, scheduler_config)
+        #elif pipe.scheduler is None:
+        #    logger.info("No scheduler provided - using DDIM")
+        #    scheduler = DDIMScheduler.from_pretrained(
+        #        args.model,
+        #        subfolder="scheduler",
+        #        clip_sample=False,
+        #        timestep_spacing="linspace",
+        #        beta_schedule="linear",
+        #        steps_offset=1,
+        #        local_files_only=True,
+        #        low_cpu_mem_usage=True,
+        #    )
+        #    pipe.scheduler = scheduler
 
-        for adapter, scale in loras.items():
-            if adapter.endswith(".safetensors"):
-                weights = safetensors.torch.load_file(adapter, device=f'cuda:{local_rank}')
-            else:
-                weights = torch.load(adapter, map_location=torch.device(f'cuda:{local_rank}'))
-            weight_name = adapter.split("/")[-1]
-            adapter_name = weight_name if not "." in weight_name else weight_name.split(".")[0]
-            adapter_names.append(adapter_name)
-            pipe.load_lora_weights(weights, weight_name=weight_name, adapter_name=adapter_name)
-            logger.info(f"Added LoRA[{i}], scale={scale}: {adapter}")
-            i += 1
+    # set vae
+    # TODO: set vae
 
-        pipe.unet.set_adapters(adapter_names, list(loras.values()))
-        #pipe.text_encoder.enable_adapters()
-        logger.info(f'Total loaded LoRAs: {i}')
-        logger.info(f'UNet Adapters: {str(pipe.unet.active_adapters())}')
-        pipe.unet.fuse_lora(adapter_names=adapter_names, lora_scale=1.0)
-        pipe.unload_lora_weights()
-        pipe.unet.to(memory_format=torch.channels_last)
-        pipe.unet = torch.compile(pipe.unet, mode="reduce-overhead", fullgraph=True)
-        logger.info(f'LoRAs have been compiled into UNet')
-        #logger.info(f'TextEncoder Adapters: {str(pipe.text_encoder.active_adapters())}')
+    # set lora
+    adapter_names = None
+    if args.lora is not None and args.type in ["sd1", "sd2", "sd3", "sdxl"]:
+        adapter_names = load_lora(args.lora, pipe, local_rank)
 
-    # memory saving functions
-    if not args.pipeline_type in ["svd"]:
-        if args.enable_slicing:
-            pipe.enable_vae_slicing()
-        if args.enable_tiling:
-            pipe.enable_vae_tiling()
-        if args.xformers_efficient:
-            pipe.enable_xformers_memory_efficient_attention()
-    if args.enable_model_cpu_offload:
-        pipe.enable_model_cpu_offload()
-    if args.enable_sequential_cpu_offload:
-        pipe.enable_sequential_cpu_offload()
+    # compiles
+    if args.compile_unet:           compile_unet(pipe, adapter_names)
+    if args.compile_vae:            compile_vae(pipe)
+    if args.compile_text_encoder:   compile_text_encoder(pipe)
 
     # set progress bar visibility
     pipe.set_progress_bar_config(disable=dist.get_rank() != 0)
@@ -288,18 +265,18 @@ def initialize():
             image = load_image("resources/rocket.png") # 1024x576 pixels
             image = image.resize((768, 432), Image.Resampling.LANCZOS)
             return image
-        generator = torch.Generator(device="cpu").manual_seed(args.seed)
+        generator = torch.Generator(device="cpu").manual_seed(1)
         async_diff.reset_state(warm_up=args.warm_up)
 
         warm_up_frames = 25
         warm_up_cfg = 7
-        warm_up_prompt = "puppy, perfect, cinematic, high dynamic range, good image contrast sharpness details"
+        warm_up_prompt = "rocket, cinematic, high dynamic range, good image contrast sharpness details"
         warm_up_negative_prompt = "wrong, disfigured, artifacts"
         warm_up_chunk_size = 8
         warm_up_width = 512
         warm_up_height = 512
 
-        match args.pipeline_type:
+        match args.type:
             case "ad":
                 if args.ip_adapter is not None and args.control_net is not None:
                     pipe(
@@ -358,163 +335,88 @@ def initialize():
                     generator=generator,
                 )
 
-        torch.cuda.empty_cache()
-
-    # finish
+    # complete
+    torch.cuda.empty_cache()
     logger.info("Model initialization completed")
     initialized = True
     return
 
 
-def generate_image_parallel(
-    positive_prompt,
-    negative_prompt,
-    image,
-    width,
-    height,
-    num_inference_steps,
-    cfg,
-    control_net_scale,
-    seed,
-    num_frames,
-    decode_chunk_size,
-    clip_skip,
-    motion_bucket_id,
-    noise_aug_strength
-):
+def generate_image_parallel(positive, negative, image, steps, cfg, control_net_scale, seed, frames, decode_chunk_size, clip_skip, motion_bucket_id, noise_aug_strength):
     global async_diff, pipe
     args = get_args()
     torch.cuda.reset_peak_memory_stats()
-    start_time = time.time()
-    generator = torch.Generator(device="cpu").manual_seed(seed)
     async_diff.reset_state(warm_up=args.warm_up)
 
-    if (args.pipeline_type in ["sdup", "svd"]) or (args.pipeline_type == "ad" and args.ip_adapter is not None):
+    generator = torch.Generator(device="cpu").manual_seed(seed)
+
+    if (args.type in ["sdup", "svd"]) or (args.type == "ad" and args.ip_adapter is not None):
         assert image is not None, "No image provided for an image pipeline."
         image = load_image(image)
-        if args.scale_input:
-            percentage = args.scale_percentage / 100
-            image = image.resize((int(image.size[0] * percentage), int(image.size[1] * percentage)), Image.Resampling.LANCZOS)
+        #if args.scale_input:
+        #    percentage = args.scale_percentage / 100
+        #    image = image.resize((int(image.size[0] * percentage), int(image.size[1] * percentage)), Image.Resampling.LANCZOS)
 
-    match args.pipeline_type:
+    match args.type:
         case "ad":
             if image is not None and args.control_net is not None and args.ip_adapter is not None:
-                logger.info(
-                    "Active request parameters:\n"
-                    f"image provided\n"
-                    f"positive_prompt={positive_prompt}\n"
-                    f"negative_prompt={negative_prompt}\n"
-                    f"width={width}\n"
-                    f"height={height}\n"
-                    f"steps={num_inference_steps}\n"
-                    f"cfg={cfg}\n"
-                    f"seed={seed}\n"
-                    f"num_frames={num_frames}\n"
-                    f"control_net_scale={control_net_scale}\n"
-                )
                 output = pipe(
-                    prompt=positive_prompt,
-                    negative_prompt=negative_prompt,
+                    prompt=positive,
+                    negative_prompt=negative,
                     ip_adapter_image=image,
-                    conditioning_frames=[image] * num_frames,
-                    width=width,
-                    height=height,
-                    num_inference_steps=num_inference_steps,
+                    conditioning_frames=[image] * frames,
+                    width=args.width,
+                    height=args.height,
+                    num_inference_steps=steps,
                     guidance_scale=cfg,
                     generator=generator,
-                    num_frames=num_frames,
+                    num_frames=frames,
                     output_type="pil",
                 ).frames[0]
             elif image is not None and args.ip_adapter is not None and args.control_net is None:
-                logger.info(
-                    "Active request parameters:\n"
-                    "image provided\n"
-                    f"positive_prompt={positive_prompt}\n"
-                    f"negative_prompt={negative_prompt}\n"
-                    f"width={width}\n"
-                    f"height={height}\n"
-                    f"steps={num_inference_steps}\n"
-                    f"cfg={cfg}\n"
-                    f"seed={seed}\n"
-                    f"num_frames={num_frames}\n"
-                )
                 output = pipe(
-                    prompt=positive_prompt,
-                    negative_prompt=negative_prompt,
+                    prompt=positive,
+                    negative_prompt=negative,
                     ip_adapter_image=image,
-                    width=width,
-                    height=height,
-                    num_inference_steps=num_inference_steps,
+                    width=args.width,
+                    height=args.height,
+                    num_inference_steps=steps,
                     guidance_scale=cfg,
                     generator=generator,
-                    num_frames=num_frames,
+                    num_frames=frames,
                     output_type="pil",
                 ).frames[0]
             else:
-                logger.info(
-                    "Active request parameters:\n"
-                    "no image provided\n"
-                    f"positive_prompt={positive_prompt}\n"
-                    f"negative_prompt={negative_prompt}\n"
-                    f"width={width}\n"
-                    f"height={height}\n"
-                    f"steps={num_inference_steps}\n"
-                    f"cfg={cfg}\n"
-                    f"seed={seed}\n"
-                    f"num_frames={num_frames}\n"
-                )
                 output = pipe(
-                    prompt=positive_prompt,
-                    negative_prompt=negative_prompt,
-                    width=width,
-                    height=height,
-                    num_inference_steps=num_inference_steps,
+                    prompt=positive,
+                    negative_prompt=negative,
+                    width=args.width,
+                    height=args.height,
+                    num_inference_steps=steps,
                     guidance_scale=cfg,
                     generator=generator,
-                    num_frames=num_frames,
+                    num_frames=frames,
                     output_type="pil",
                 ).frames[0]
         case "sdup":
-            logger.info(
-                "Active request parameters:\n"
-                f"image provided\n"
-                f"positive_prompt={positive_prompt}\n"
-                f"negative_prompt={negative_prompt}\n"
-                f"steps={num_inference_steps}\n"
-                f"cfg={cfg}\n"
-                f"seed={seed}\n"
-            )
             output = pipe(
-                prompt=positive_prompt,
-                negative_prompt=negative_prompt,
+                prompt=positive,
+                negative_prompt=negative,
                 image=image,
-                num_inference_steps=num_inference_steps,
+                num_inference_steps=steps,
                 guidance_scale=cfg,
                 generator=generator,
                 output_type="pil",
             ).images[0]
         case "svd":
-            logger.info(
-                "Active request parameters:\n"
-                f"image provided\n"
-                f"width={width}\n"
-                f"height={height}\n"
-                f"steps={num_inference_steps}\n"
-                f"cfg={cfg}\n"
-                f"seed={seed}\n"
-                f"num_frames={num_frames}\n"
-                f"decode_chunk_size={decode_chunk_size}\n"
-                f"motion_bucket_id={motion_bucket_id}\n"
-                f"noise_aug_strength={noise_aug_strength}\n"
-            )
             output = pipe(
                 image,
-                width=width,
-                height=height,
-                num_inference_steps=num_inference_steps,
+                width=args.width,
+                height=args.height,
+                num_inference_steps=steps,
                 min_guidance_scale=cfg,
                 generator=generator,
-                num_frames=num_frames,
+                num_frames=frames,
                 decode_chunk_size=decode_chunk_size,
                 motion_bucket_id=motion_bucket_id,
                 noise_aug_strength=noise_aug_strength,
@@ -525,12 +427,10 @@ def generate_image_parallel(
             positive_pooled_embeds = None
             negative_embeds = None
             negative_pooled_embeds = None
-            can_use_compel = args.compel and args.pipeline_type in ["sd1", "sd2", "sdxl"]
+            can_use_compel = args.compel and args.type in ["sd1", "sd2", "sdxl"]
             if can_use_compel:
-                if args.pipeline_type in ["sd1", "sd2"]:
-                    embeddings_type = ReturnedEmbeddingsType.PENULTIMATE_HIDDEN_STATES_NORMALIZED
-                else:
-                    embeddings_type = ReturnedEmbeddingsType.PENULTIMATE_HIDDEN_STATES_NON_NORMALIZED
+                if args.type in ["sd1", "sd2"]: embeddings_type = ReturnedEmbeddingsType.PENULTIMATE_HIDDEN_STATES_NORMALIZED
+                else:                           embeddings_type = ReturnedEmbeddingsType.PENULTIMATE_HIDDEN_STATES_NON_NORMALIZED
                 compel = Compel(
                     tokenizer=[pipe.tokenizer, pipe.tokenizer_2],
                     text_encoder=[pipe.text_encoder, pipe.text_encoder_2],
@@ -538,30 +438,19 @@ def generate_image_parallel(
                     requires_pooled=[False, True],
                     truncate_long_prompts=False,
                 )
-                positive_embeds, positive_pooled_embeds = compel([positive_prompt])
-                if negative_prompt and len(negative_prompt) > 0:
-                    negative_embeds, negative_pooled_embeds = compel([negative_prompt])
-            logger.info(
-                "Active request parameters:\n"
-                f"positive_prompt={positive_prompt}\n"
-                f"negative_prompt={negative_prompt}\n"
-                f"width={width}\n"
-                f"height={height}\n"
-                f"steps={num_inference_steps}\n"
-                f"cfg={cfg}\n"
-                f"seed={seed}\n"
-                f"clip_skip={clip_skip}\n"
-            )
+                positive_embeds, positive_pooled_embeds = compel([positive])
+                if negative and len(negative) > 0:
+                    negative_embeds, negative_pooled_embeds = compel([negative])
             output = pipe(
-                prompt=positive_prompt if positive_embeds is None else None,
-                negative_prompt=negative_prompt if negative_embeds is None else None,
+                prompt=positive if positive_embeds is None else None,
+                negative_prompt=negative if negative_embeds is None else None,
                 prompt_embeds=positive_embeds,
                 pooled_prompt_embeds=positive_pooled_embeds,
                 negative_embeds=negative_embeds,
                 negative_pooled_embeds=negative_pooled_embeds,
-                width=width,
-                height=height,
-                num_inference_steps=num_inference_steps,
+                width=args.width,
+                height=args.height,
+                num_inference_steps=steps,
                 guidance_scale=cfg,
                 generator=generator,
                 clip_skip=clip_skip,
@@ -571,19 +460,16 @@ def generate_image_parallel(
                 # https://github.com/damian0815/compel/issues/24
                 positive_embeds = positive_pooled_embeds = negative_embeds = negative_pooled_embeds = None
 
-    end_time = time.time()
-    elapsed_time = end_time - start_time
-
     torch.cuda.empty_cache()
 
     if dist.get_rank() == 0:
-        is_image = not args.pipeline_type in ["ad", "svd"]
+        is_image = not args.type in ["ad", "svd"]
         if output is not None:
             pickled = pickle.dumps(output)
             output_base64 = base64.b64encode(pickled).decode('utf-8')
-            return output_base64, elapsed_time, is_image
+            return output_base64, is_image
         else:
-            return None, elapsed_time, is_image
+            return None, is_image
 
 
 @app.route("/generate", methods=["POST"])
@@ -592,48 +478,27 @@ def generate_image():
 
     logger.info("Received POST request for image generation")
     data = request.json
-    positive_prompt     = data.get("positive_prompt", None)
-    negative_prompt     = data.get("negative_prompt", None)
-    image               = data.get("image", None)
-    width               = data.get("width")
-    height              = data.get("height")
-    num_inference_steps = data.get("num_inference_steps")
-    guidance_scale      = data.get("cfg")
+    positive            = data.get("positive")
+    negative            = data.get("negative")
+    image               = data.get("image")
+    steps               = data.get("steps")
+    cfg                 = data.get("cfg")
     controlnet_scale    = data.get("controlnet_scale")
     seed                = data.get("seed")
-    num_frames          = data.get("num_frames")
+    frames              = data.get("frames")
     decode_chunk_size   = data.get("decode_chunk_size")
     clip_skip           = data.get("clip_skip")
     motion_bucket_id    = data.get("motion_bucket_id")
     noise_aug_strength  = data.get("noise_aug_strength")
 
-    assert (image is not None or len(positive_prompt) > 0), "No input provided"
+    assert (image is not None or len(positive) > 0), "No input provided"
+    if image is not None: image = Image.open(image)
 
-    if image is not None:
-        image = Image.open(image)
-
-    params = [
-        positive_prompt,
-        negative_prompt,
-        image,
-        width,
-        height,
-        num_inference_steps,
-        guidance_scale,
-        controlnet_scale,
-        seed,
-        num_frames,
-        decode_chunk_size,
-        clip_skip,
-        motion_bucket_id,
-        noise_aug_strength
-    ]
+    params = [positive, negative, image, steps, cfg, controlnet_scale, seed, frames, decode_chunk_size, clip_skip, motion_bucket_id, noise_aug_strength]
     dist.broadcast_object_list(params, src=0)
-    output_base64, elapsed_time, is_image = generate_image_parallel(*params)
+    output_base64, is_image = generate_image_parallel(*params)
 
     response = {
-        "message": "Image generated successfully",
-        "elapsed_time": f"{elapsed_time:.2f} sec",
         "output": output_base64,
         "is_image": is_image,
     }
@@ -648,10 +513,10 @@ def run_host():
         app.run(host="localhost", port=args.port)
     else:
         while True:
-            params = [None] * 14 # len(params) of generate_image_parallel()
+            params = [None] * 12 # len(params) of generate_image_parallel()
             logger.info(f"Rank {dist.get_rank()} waiting for tasks")
             dist.broadcast_object_list(params, src=0)
-            if params[0] is None:
+            if params[0] is None and params[2] is None:
                 logger.info("Received exit signal, shutting down")
                 break
             logger.info(f"Received task with parameters: {params}")

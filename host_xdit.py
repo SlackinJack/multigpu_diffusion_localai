@@ -6,20 +6,22 @@ import json
 import logging
 import os
 import pickle
+import requests
 import safetensors
 import time
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
-from diffusers import FluxTransformer2DModel, GGUFQuantizationConfig
+from diffusers import AutoencoderKL, FluxTransformer2DModel, GGUFQuantizationConfig, QuantoConfig
 from flask import Flask, request, jsonify
-from optimum.quanto import freeze, qint2, qint4, qint8, qfloat8, quantize
+from optimum.quanto import freeze, quantize
 from PIL import Image
 from transformers import T5EncoderModel
 
 from xDiT.xfuser import xFuserFluxPipeline, xFuserStableDiffusion3Pipeline, xFuserArgs
 from xDiT.xfuser.config import FlexibleArgumentParser
 
+from modules.host_generics import *
 from modules.scheduler_config import get_scheduler
 
 app = Flask(__name__)
@@ -29,11 +31,18 @@ input_config = None
 local_rank = None
 logger = None
 pipe = None
+result = None
+cache_args = {
+    "use_teacache": True,
+    "use_fbcache": True,
+    "rel_l1_thresh": 0.12,
+    "return_hidden_states_first": False,
+    "num_steps": 30,
+}
 
 
 def get_args():
     parser = FlexibleArgumentParser(description="xFuser Arguments")
-
     # xDiT arguments
     """
         [--model MODEL] [--download-dir DOWNLOAD_DIR]
@@ -67,18 +76,11 @@ def get_args():
         [--threshold THRESHOLD] [--window_size WINDOW_SIZE]
         [--coco_path COCO_PATH] [--use_cache]
     """
-
-    # Added arguments
-    parser.add_argument("--scheduler", type=str, default="dpmpp_2m", help="Scheduler name")
-    parser.add_argument("--warm_up_steps", type=int, default=40)
-    parser.add_argument("--port", type=int, default=6000, help="Listening port number")
-    parser.add_argument("--model_path", type=str, default=None, help="Path to model folder")
-    parser.add_argument("--variant", type=str, default="fp16", help="PyTorch variant [fp16/fp32]")
-    parser.add_argument("--pipeline_type", type=str, default=None, choices=["flux", "sd3"])
-    parser.add_argument("--lora", type=str, default=None, help="A dictionary of LoRAs to load, with their weights")
-    parser.add_argument("--xformers_efficient", action="store_true")
-    parser.add_argument("--quantize_encoder", action="store_true")
-    parser.add_argument("--quantize_encoder_type", default="qfloat8", choices=["qint2", "qint4", "qint8", "qfloat8"])
+    #generic
+    for k,v in GENERIC_HOST_ARGS.items():
+        if k not in ["height", "width", "model"]:
+            parser.add_argument(f"--{k}", type=v, default=None)
+    for e in GENERIC_HOST_ARGS_TOGGLES:     parser.add_argument(f"--{e}", action="store_true")
     args = xFuserArgs.add_cli_args(parser).parse_args()
     return args
 
@@ -93,347 +95,272 @@ def setup_logger():
 @app.route("/initialize", methods=["GET"])
 def check_initialize():
     global initialized
-    if initialized: return jsonify({"status": "initialized"}), 200
-    else:           return jsonify({"status": "initializing"}), 202
+    if initialized: return "", 200
+    else:           return "", 202
 
 
 def initialize():
-    global pipe, engine_config, input_config, local_rank, initialized
-
+    global pipe, engine_config, input_config, local_rank, initialized, cache_args
     args = get_args()
-    assert (args.height > 0 and args.width > 0), "Invalid image dimensions"
-    assert args.model_path is not None, "No model specified"
-    assert args.variant in ["fp16", "fp32"], "Unsupported variant"
-    match args.variant:
-        case "fp16":
-            torch_dtype = torch.float16
-        case _:
-            torch_dtype = torch.float32
 
+    # checks
+    # TODO: checks
+
+    # set torch type
+    torch_dtype = get_torch_type(args.variant)
+
+    # init distributed inference
     # remove all our args before passing it to xdit
     xfuser_args = copy.deepcopy(args)
+    del xfuser_args.gguf_model
     del xfuser_args.scheduler
     del xfuser_args.warm_up_steps
     del xfuser_args.port
-    xfuser_args.model = xfuser_args.model_path
-    del xfuser_args.model_path
     del xfuser_args.variant
-    del xfuser_args.pipeline_type
+    del xfuser_args.type
     del xfuser_args.lora
+    del xfuser_args.compile_unet
+    del xfuser_args.compile_vae
+    del xfuser_args.compile_text_encoder
     del xfuser_args.quantize_encoder
     del xfuser_args.quantize_encoder_type
-
     engine_args = xFuserArgs.from_cli_args(xfuser_args)
     engine_config, input_config = engine_args.create_config()
     engine_config.runtime_config.dtype = torch_dtype
-
     local_rank = int(os.environ.get("LOCAL_RANK"))
     setup_logger()
+    logger.info(f"Initializing model on GPU: {torch.cuda.current_device()}")
+
+    # quantize
+    q_config = None
+    if args.quantize_encoder:
+        q_config = QuantoConfig(weights_dtype=args.quantize_encoder_type, activations_dtype=args.quantize_encoder_type)
 
     def do_quantization(model, desc):
         logging.info(f"rank {local_rank} quantizing {desc} to {args.quantize_encoder_type}")
-        match args.quantize_encoder_type:
-            case "qint2":
-                weights = qint2
-            case "qint4":
-                weights = qint4
-            case "qint8":
-                weights = qint8
-            case _:
-                weights = qfloat8
+        weights = get_encoder_type(args.quantize_encoder_type)
         quantize(model, weights=weights)
         freeze(model)
 
-    match args.pipeline_type:
+    # set pipeline
+    match args.type:
         case "flux":
             using_gguf = False
-            # GGUF loader
-            if xfuser_args.model.endswith(".gguf"):
-                # we expect the Flux model folder in the same location, eg:
-                # models |
-                #        | - FLUX.1-schnell-Q5_K_S.gguf <- Quantized GGUF transformer
-                #        | - FLUX.1-schnell/            <- Base FLUX model folder
-                #        | - other models
-                #        | - ...
+            if args.gguf_model:
                 using_gguf = True
-                flux_gguf = xfuser_args.model
-                parts = xfuser_args.model.split("/")
-                gguf_file_name = parts[len(parts) - 1]
-                folder = xfuser_args.model.replace(gguf_file_name, "")
-                if "schnell" in xfuser_args.model:
-                    # FLUX.1-schnell
-                    flux_folder = folder + "FLUX.1-schnell"
-                elif "dev" in xfuser_args.model:
-                    # FLUX.1-dev
-                    flux_folder = folder + "FLUX.1-dev"
-                else:
-                    assert False, "Unknown FLUX type"
-
-                logging.info("Loading Flux GGUF: " + flux_gguf + ", Flux Folder: " + flux_folder)
                 transformer = FluxTransformer2DModel.from_single_file(
-                    flux_gguf,
-                    quantization_config=GGUFQuantizationConfig(compute_dtype=torch_dtype),
+                    args.gguf_model,
                     torch_dtype=torch_dtype,
-                    config=flux_folder+"/transformer",
+                    config=args.model+"/transformer",
+                    #use_safetensors=True,
                     local_files_only=True,
+                    low_cpu_mem_usage=True,
+                    quantization_config=GGUFQuantizationConfig(compute_dtype=torch_dtype),
                 )
-
             if using_gguf:
                 if args.quantize_encoder:
-                    text_encoder_2 = T5EncoderModel.from_pretrained(flux_folder, subfolder="text_encoder_2", torch_dtype=torch_dtype)
+                    text_encoder_2 = T5EncoderModel.from_pretrained(args.model, subfolder="text_encoder_2", torch_dtype=torch_dtype)
                     do_quantization(text_encoder_2, "text_encoder_2")
                     pipe = xFuserFluxPipeline.from_pretrained(
-                        pretrained_model_name_or_path=flux_folder,
+                        pretrained_model_name_or_path=args.model,
                         engine_config=engine_config,
-                        cache_args={
-                            "use_teacache": True,
-                            "use_fbcache": True,
-                            "rel_l1_thresh": 0.12,
-                            "return_hidden_states_first": False,
-                            "num_steps": 30,
-                        },
+                        cache_args=cache_args,
                         transformer=transformer,
                         text_encoder_2=text_encoder_2,
                         torch_dtype=torch_dtype,
+                        use_safetensors=True,
                         local_files_only=True,
+                        low_cpu_mem_usage=True,
+                        quantization_config=q_config,
                     )
                 else:
                     pipe = xFuserFluxPipeline.from_pretrained(
-                        pretrained_model_name_or_path=flux_folder,
+                        pretrained_model_name_or_path=args.model,
                         engine_config=engine_config,
-                        cache_args={
-                            "use_teacache": True,
-                            "use_fbcache": True,
-                            "rel_l1_thresh": 0.12,
-                            "return_hidden_states_first": False,
-                            "num_steps": 30,
-                        },
+                        cache_args=cache_args,
                         transformer=transformer,
                         torch_dtype=torch_dtype,
+                        use_safetensors=True,
                         local_files_only=True,
+                        low_cpu_mem_usage=True,
+                        quantization_config=q_config,
                     )
             else:
                 if args.quantize_encoder:
-                    text_encoder_2 = T5EncoderModel.from_pretrained(xfuser_args.model, subfolder="text_encoder_2", torch_dtype=torch_dtype)
+                    text_encoder_2 = T5EncoderModel.from_pretrained(args.model, subfolder="text_encoder_2", torch_dtype=torch_dtype)
                     do_quantization(text_encoder_2, "text_encoder_2")
                     pipe = xFuserFluxPipeline.from_pretrained(
-                        pretrained_model_name_or_path=xfuser_args.model,
+                        pretrained_model_name_or_path=args.model,
                         engine_config=engine_config,
-                        cache_args={
-                            "use_teacache": True,
-                            "use_fbcache": True,
-                            "rel_l1_thresh": 0.12,
-                            "return_hidden_states_first": False,
-                            "num_steps": 30,
-                        },
+                        cache_args=cache_args,
                         text_encoder_2=text_encoder_2,
                         torch_dtype=torch_dtype,
+                        use_safetensors=True,
                         local_files_only=True,
+                        low_cpu_mem_usage=True,
+                        quantization_config=q_config,
                     )
                 else:
                     pipe = xFuserFluxPipeline.from_pretrained(
-                        pretrained_model_name_or_path=xfuser_args.model,
+                        pretrained_model_name_or_path=args.model,
                         engine_config=engine_config,
-                        cache_args={
-                            "use_teacache": True,
-                            "use_fbcache": True,
-                            "rel_l1_thresh": 0.12,
-                            "return_hidden_states_first": False,
-                            "num_steps": 30,
-                        },
+                        cache_args=cache_args,
                         torch_dtype=torch_dtype,
+                        use_safetensors=True,
                         local_files_only=True,
+                        low_cpu_mem_usage=True,
+                        quantization_config=q_config,
                     )
         case "sd3":
             if args.quantize_encoder:
-                text_encoder_3 = T5EncoderModel.from_pretrained(xfuser_args.model, subfolder="text_encoder_3", torch_dtype=torch_dtype)
+                text_encoder_3 = T5EncoderModel.from_pretrained(args.model, subfolder="text_encoder_3", torch_dtype=torch_dtype)
                 do_quantization(text_encoder_3, "text_encoder_3")
-
                 pipe = xFuserStableDiffusion3Pipeline.from_pretrained(
-                    pretrained_model_name_or_path=xfuser_args.model,
+                    pretrained_model_name_or_path=args.model,
                     engine_config=engine_config,
                     text_encoder_3=text_encoder_3,
                     torch_dtype=torch_dtype,
+                    use_safetensors=True,
+                    local_files_only=True,
+                    low_cpu_mem_usage=True,
+                    quantization_config=q_config,
                 )
             else:
                 pipe = xFuserStableDiffusion3Pipeline.from_pretrained(
-                    pretrained_model_name_or_path=xfuser_args.model,
+                    pretrained_model_name_or_path=args.model,
                     engine_config=engine_config,
                     torch_dtype=torch_dtype,
+                    use_safetensors=True,
+                    local_files_only=True,
+                    low_cpu_mem_usage=True,
+                    quantization_config=q_config,
                 )
         case _: raise NotImplementedError
 
-    # TODO: implement scheduler
-    #pipe.scheduler = get_scheduler(args.scheduler, pipe.scheduler.config)
+    # set memory saving
+    if args.type not in ["sd3"]:
+        if args.enable_vae_slicing: pipe.enable_vae_slicing()
+        if args.enable_vae_tiling:  pipe.enable_vae_tiling()
+    if args.xformers_efficient: pipe.enable_xformers_memory_efficient_attention()
+    pipe = pipe.to(f"cuda:{local_rank}")
 
+    # set ipadapter
+    # TODO: set ipadapter
+
+    # set scheduler
+    # TODO: set scheduler
+    # pipe.scheduler = get_scheduler(args.scheduler, pipe.scheduler.config)
+
+    # set vae
+    # TODO: set vae
+
+    # set lora
+    adapter_names = None
     if args.lora:
-        pipe.unet.enable_lora()
-        loras = json.loads(args.lora)
-        weight_names = []
-        i = 0
+        adapter_names = load_lora(args.lora, pipe, local_rank)
 
-        for adapter, scale in loras.items():
-            if adapter.endswith(".safetensors"):
-                weights = safetensors.torch.load_file(adapter, device=f'cuda:{local_rank}')
-            else:
-                weights = torch.load(adapter, map_location=torch.device(f'cuda:{local_rank}'))
-            weight_names.append(str(i))
-            pipe.load_lora_weights(weights, weight_name=str(i))
-            logger.info(f"Added LoRA[{i}], scale={scale}: {adapter}")
-            i += 1
+    # compiles
+    if args.compile_unet and args.type not in ["flux", "sd3"]:  compile_unet(pipe, adapter_names)
+    if args.compile_vae:                                        compile_vae(pipe)
+    if args.compile_text_encoder:                               compile_text_encoder(pipe)
 
-        pipe.unet.set_adapters(weight_names, list(loras.values()))
-        logger.info(f'Total loaded LoRAs: {i}')
+    # set progress bar visibility
+    pipe.set_progress_bar_config(disable=local_rank != 0)
 
-    if args.enable_slicing:
-        pipe.enable_vae_slicing()
-    if args.enable_tiling:
-        pipe.enable_vae_tiling()
-    if args.enable_model_cpu_offload:
-        pipe.enable_model_cpu_offload()
-    if args.enable_sequential_cpu_offload:
-        #pipe.enable_sequential_cpu_offload()
-        pipe.enable_sequential_cpu_offload(gpu_id=local_rank)
-    else:
-        pipe = pipe.to(f"cuda:{local_rank}")
-    if args.xformers_efficient:
-        pipe.enable_xformers_memory_efficient_attention()
-
-    # warmup run
-    start_time = time.time()
+    # warm up run
     output = pipe(
         height=512,
         width=512,
         prompt="a dog",
-        num_inference_steps=30,
+        num_inference_steps=args.warm_up_steps,
         guidance_scale=7,
         generator=torch.Generator(device="cpu").manual_seed(1),
         max_sequence_length=256,
         output_type="pil",
         use_resolution_binning=input_config.use_resolution_binning,
     )
-    end_time = time.time()
-    elapsed_time = end_time - start_time
 
+    # complete
     torch.cuda.empty_cache()
     logger.info("Model initialization completed")
     initialized = True
-
     return
 
 
-def generate_image_parallel(
-    positive_prompt,
-    negative_prompt,
-    width,
-    height,
-    num_inference_steps,
-    cfg,
-    seed,
-    clip_skip,
-    output_path
-):
-    global pipe, local_rank, input_config
-    logger.info(
-        "Active request parameters:\n"
-        f"positive_prompt={positive_prompt}\n"
-        f"negative_prompt={negative_prompt}\n"
-        f"width={width}\n"
-        f"height={height}\n"
-        f"steps={num_inference_steps}\n"
-        f"cfg={cfg}\n"
-        f"seed={seed}\n"
-        f"clip_skip={clip_skip}\n"
-        f"output_path={output_path}\n"
-    )
-    logger.info(f"Starting image generation with prompt: {positive_prompt}")
-    logger.info(f"Negative: {negative_prompt}")
-    torch.cuda.reset_peak_memory_stats()
-    start_time = time.time()
+def generate_image_parallel(positive, negative, steps, cfg, seed, clip_skip):
+    global pipe, local_rank, input_config, result
     args = get_args()
+    torch.cuda.reset_peak_memory_stats()
 
-    match args.pipeline_type:
+    generator = torch.Generator(device="cpu").manual_seed(seed)
+
+    match args.type:
         case _:
             is_image = True
             output = pipe(
-                prompt=positive_prompt,
-                negative_prompt=negative_prompt,
-                width=width,
-                height=height,
-                num_inference_steps=num_inference_steps,
+                prompt=positive,
+                negative_prompt=negative,
+                width=args.width,
+                height=args.height,
+                num_inference_steps=steps,
                 guidance_scale=cfg,
-                generator=torch.Generator(device="cpu").manual_seed(seed),
+                generator=generator,
                 clip_skip=clip_skip,
                 max_sequence_length=256,
                 output_type="pil",
                 use_resolution_binning=input_config.use_resolution_binning,
             )
-    end_time = time.time()
-    elapsed_time = end_time - start_time
 
     torch.cuda.empty_cache()
 
-    # only last rank will output an image
-    # this can be a bit race-y
-    if pipe.is_dp_last_group():
-        logger.info(f"Output generated on rank {local_rank}")
-        if is_image:
-            output.images[0].save(output_path)
-        else:
-            logging.info("Frames still need to be implemented!")
-    else:
+    if local_rank == 0:
+        while True:
+            if result is not None:
+                output_base64 = result
+                result = None
+                return output_base64, is_image
+    elif output is not None:
         logger.info(f"Rank {local_rank} task completed")
-        # adjust delay as needed
-        time.sleep(5)
-
-    if is_image:
-        image = Image.open(output_path)
-        pickled = pickle.dumps(image)
+        if is_image:    pickled = pickle.dumps(output.images[0])
+        else:           pickled = pickle.dumps(output.frames[0])
         output_base64 = base64.b64encode(pickled).decode("utf-8")
-        return output_base64, elapsed_time, is_image
-    else:
-        logging.info("Frames still need to be implemented!")
-        return None, elapsed_time, is_image
+        with app.app_context():
+            requests.post(f"http://localhost:{args.port}/set_result", json={ "output": output_base64 })
+
+
+@app.route("/set_result", methods=["POST"])
+def set_result():
+    global result
+    data = request.json
+    result = data.get("output")
+    return "", 200
 
 
 @app.route("/generate", methods=["POST"])
 def generate_image():
     logger.info("Received POST request for image generation")
     data = request.json
-    positive_prompt     = data.get("positive_prompt", None)
-    negative_prompt     = data.get("negative_prompt", None)
-    width               = data.get("width")
-    height              = data.get("height")
-    num_inference_steps = data.get("num_inference_steps")
+    positive            = data.get("positive")
+    negative            = data.get("negative")
+    steps               = data.get("steps")
     cfg                 = data.get("cfg",)
     seed                = data.get("seed")
     clip_skip           = data.get("clip_skip")
-    output_path         = data.get("output_path", None)
 
-    assert output_path is not None, "No output path provided"
-
-    logger.info(
-        "Request parameters:\n"
-        f"positive_prompt='{positive_prompt}'\n"
-        f"negative_prompt='{negative_prompt}'\n"
-        f"width={width}\n"
-        f"height={height}\n"
-        f"steps={num_inference_steps}\n"
-        f"cfg={cfg}\n"
-        f"seed={seed}\n"
-        f"clip_skip={clip_skip}\n"
-        f"output_path={output_path}\n"
-    )
-
-    # Broadcast request parameters to all processes
-    params = [positive_prompt, negative_prompt, width, height, num_inference_steps, cfg, seed, clip_skip, output_path]
+    params = [
+        positive,
+        negative,
+        steps,
+        cfg,
+        seed,
+        clip_skip
+    ]
     dist.broadcast_object_list(params, src=0)
     logger.info("Parameters broadcasted to all processes")
 
-    output_base64, elapsed_time, is_image = generate_image_parallel(*params)
+    output_base64, is_image = generate_image_parallel(*params)
 
     response = {
-        "elapsed_time": f"{elapsed_time:.2f} sec",
         "output": output_base64,
         "is_image": is_image,
     }
@@ -449,7 +376,7 @@ def run_host():
         app.run(host="localhost", port=args.port)
     else:
         while True:
-            params = [None] * 9 # len(params) of generate_image_parallel()
+            params = [None] * 6 # len(params) of generate_image_parallel()
             logger.info(f"Rank {dist.get_rank()} waiting for tasks")
             dist.broadcast_object_list(params, src=0)
             if params[0] is None:

@@ -27,13 +27,15 @@ os.environ["TORCH_NCCL_ASYNC_ERROR_HANDLING"] = "1"
 #os.environ["NCCL_P2P_DISABLE"] = "0"
 
 
-config = json.load(open("config.json"))
-config_global = config["global"]
-config_asyncdiff = config["asyncdiff"]
-config_distrifuser = config["distrifuser"]
-config_xdit = config["xdit"]
-if len(config_global["cuda_devices"]) > 0:
-    os.environ["CUDA_VISIBLE_DEVICES"] = config_global["cuda_devices"]
+config              = json.load(open("config.json"))
+config_global       = config["global"]
+config_asyncdiff    = config["asyncdiff"]
+config_distrifuser  = config["distrifuser"]
+config_xdit         = config["xdit"]
+config_extra        = {}
+if len(config_global["cuda_devices"]) > 0:  os.environ["CUDA_VISIBLE_DEVICES"] = config_global["cuda_devices"]
+
+
 URL = f'http://localhost:{config_global["port"]}'
 
 
@@ -66,9 +68,9 @@ class BackendServicer(backend_pb2_grpc.BackendServicer):
     # pipeline vars
     height = None
     width = None
-    model_path = None
+    model = None
     cfg_scale = 7
-    pipeline_type = None
+    type = None
     scheduler = None
     variant = "fp16"
     loras = {}
@@ -93,19 +95,28 @@ class BackendServicer(backend_pb2_grpc.BackendServicer):
 
 
     def LoadModel(self, request, context):
+        # TODO: use options
+        options = request.Options
+        for opt in options:
+            o = opt.split(":")
+            assert len(o) == 2, "Malformed option: " + opt
+            k = o[0]
+            v = o[1]
+            config_extra[k] = v
+
         # detect host to use
-        self.pipeline_type = request.PipelineType
-        if self.nproc_per_node <= 2 and self.pipeline_type in ["sd1", "sd2", "sdxl"]:
+        self.type = request.PipelineType
+        if self.type in ["sd1", "sd2", "sdxl"] and self.nproc_per_node <= 2:
             # distrifuser
             if self.process_type != 1:
                 self.log_reload_reason(f"Host type changed to DistriFuser with {self.nproc_per_node} GPUs")
                 self.process_type = 1
-        elif self.pipeline_type in ["flux", "sd3"]:
+        elif self.type in ["flux", "sd3"]:
             # xdit
             if self.process_type != 2:
                 self.log_reload_reason(f"Host type changed to xDiT with {self.nproc_per_node} GPUs")
                 self.process_type = 2
-        elif self.pipeline_type in ["ad", "sd1", "sd2", "sd3", "sdup", "sdxl", "svd"]:
+        elif self.type in ["ad", "sd1", "sd2", "sd3", "sdup", "sdxl", "svd"]:
             # asyncdiff
             if self.process_type != 0:
                 self.log_reload_reason(f"Host type changed to AsyncDiff with {self.nproc_per_node} GPUs")
@@ -113,19 +124,19 @@ class BackendServicer(backend_pb2_grpc.BackendServicer):
         else:
             assert False, "Unsupported pipeline type"
 
-        if request.PipelineType != self.pipeline_type: 
-            self.pipeline_type = request.PipelineType
+        if request.PipelineType != self.type: 
+            self.type = request.PipelineType
             self.log_reload_reason("Pipeline type changed")
 
         if request.CFGScale > 0 and self.cfg_scale != request.CFGScale:
             self.cfg_scale = request.CFGScale
 
-        if request.Model != self.model_path or (len(request.ModelFile) > 0 and os.path.exists(request.ModelFile) and request.ModelFile != self.model_path):
+        if request.Model != self.model or (len(request.ModelFile) > 0 and os.path.exists(request.ModelFile) and request.ModelFile != self.model):
             self.log_reload_reason("Model changed")
 
-        self.model_path = request.Model
+        self.model = request.Model
         if request.ModelFile != "" and os.path.exists(request.ModelFile):
-            self.model_path = request.ModelFile
+            self.model = request.ModelFile
             self.log_reload_reason("Model changed")
 
         if request.F16Memory and self.variant != "fp16":
@@ -172,18 +183,14 @@ class BackendServicer(backend_pb2_grpc.BackendServicer):
 
 
     def GenerateImage(self, request, context):
-        # distrifuser (districonfig) needs reload to apply resolution
-        if self.process_type == 1:
-            if request.height != self.height or request.width != self.width:
-                self.log_reload_reason("Resolution changed")
-
-        self.height = request.height
-        self.width = request.width
+        if request.height != self.height or request.width != self.width:
+            self.log_reload_reason("Resolution changed")
+            self.height = request.height
+            self.width = request.width
 
         if not self.loaded or self.needs_reload:
             if self.process_type == 0:
-                logging.info("Using AsyncDiff host for pipeline type: " + self.pipeline_type)
-                host = "host_asyncdiff.py"
+                logging.info("Using AsyncDiff host for pipeline type: " + self.type)
 
                 assert self.nproc_per_node > 1, "AsyncDiff requires at least 2 GPUs."
                 assert self.nproc_per_node < 6, "AsyncDiff does not support more than 5 GPUs. You can set a limit using CUDA_VISIBLE_DEVICES."
@@ -202,75 +209,19 @@ class BackendServicer(backend_pb2_grpc.BackendServicer):
                         model_n = 4
                         stride = 2
 
-                cmd = [
-                    'torchrun',
-                    f'--nproc_per_node={self.nproc_per_node}',
-                    f'--master-port={config_global["master_port"]}',
-                    f'{host}',
-
-                    f'--port={config_global["port"]}',
-                    f'--model={self.model_path}',
-                    f'--pipeline_type={self.pipeline_type}',
-                    f'--model_n={model_n}',
-                    f'--stride={stride}',
-                    f'--time_shift={config_asyncdiff["time_shift"]}',
-                    f'--variant={self.variant}',
-                ]
-
-                if self.controlnet is not None:
-                    cmd.append(f'--controlnet={self.controlnet}')
-                    cmd.append(f'--controlnet_scale={config_asyncdiff["controlnet_scale"]}')
-
-                if self.low_vram:
-                    # cmd.append('--enable_model_cpu_offload')          # breaks parallelism
-                    # cmd.append('--enable_sequential_cpu_offload')     # crash
-                    cmd.append('--enable_tiling')
-                    cmd.append('--enable_slicing')
-                    cmd.append('--xformers_efficient')
-                    cmd.append('--scale_input')
-
-                if config_asyncdiff["scale_percentage"] != 100:
-                    cmd.append(f'--scale_percentage={config_asyncdiff["scale_percentage"]}')
+                config = {}
+                config["model_n"] = model_n
+                config["stride"] = stride
+                self.launch_host(config, "asyncdiff")
 
             elif self.process_type == 1:
-                logging.info("Using DistriFuser host for pipeline type: " + self.pipeline_type)
-                host = "host_distrifuser.py"
+                logging.info("Using DistriFuser host for pipeline type: " + self.type)
 
-                cmd = [
-                    'torchrun',
-                    f'--nproc_per_node={self.nproc_per_node}',
-                    f'--master-port={config_global["master_port"]}',
-                    f'{host}',
-
-                    f'--port={config_global["port"]}',
-                    f'--model_path={self.model_path}',
-                    f'--pipeline_type={self.pipeline_type}',
-                    f'--variant={self.variant}',
-                    f'--height={self.height}',
-                    f'--width={self.width}',
-                    f'--sync_mode={config_distrifuser["sync_mode"]}',
-                    f'--parallelism={config_distrifuser["parallelism"]}',
-                    f'--split_scheme={config_distrifuser["split_scheme"]}',
-                ]
-
-                # enable for more vram usage, and slower
-                # best to leave this disabled
-                if config_distrifuser["no_split_batch"]:
-                    cmd.append('--no_split_batch')
-
-                # never works for me
-                if config_distrifuser["no_cuda_graph"]:
-                    cmd.append('--no_cuda_graph')
-
-                if self.low_vram:
-                    # cmd.append('--enable_model_cpu_offload')          # breaks parallelism
-                    # cmd.append('--enable_sequential_cpu_offload')     # crash
-                    cmd.append('--enable_tiling')
-                    cmd.append('--enable_slicing')
-                    cmd.append('--xformers_efficient')
+                config = {}
+                self.launch_host(config, "distrifuser")
 
             elif self.process_type == 2:
-                logging.info("Using xDiT host for pipeline type: " + self.pipeline_type)
+                logging.info("Using xDiT host for pipeline type: " + self.type)
                 host = "host_xdit.py"
 
                 assert self.nproc_per_node > 1, "xDiT requires at least 2 GPUs."
@@ -299,85 +250,16 @@ class BackendServicer(backend_pb2_grpc.BackendServicer):
                 u_deg = config_xdit["ulysses_degree"]
                 r_deg = config_xdit["ring_degree"]
                 cfg_parallel = 2 if config_xdit["use_cfg_parallel"] else 1
-
                 test_product = pf_deg * tp_deg * dp_deg * u_deg * r_deg * cfg_parallel
                 assert test_product == self.nproc_per_node, "pipefusion * tensor * data * ulysses * ring * (cfg ? 2 : 1) must equal nproc_per_node."
 
-                cmd = [
-                    'torchrun',
-                    f'--nproc_per_node={self.nproc_per_node}',
-                    f'--master-port={config_global["master_port"]}',
-                    f'{host}',
-
-                    f'--port={config_global["port"]}',
-                    f'--model_path={self.model_path}',
-                    f'--pipeline_type={self.pipeline_type}',
-                    f'--variant={self.variant}',
-                    f'--height={self.height}',
-                    f'--width={self.width}',
-                    f'--pipefusion_parallel_degree={pf_deg}',
-                    f'--tensor_parallel_degree={tp_deg}',
-                    f'--data_parallel_degree={dp_deg}',
-                    f'--ulysses_degree={u_deg}',
-                    f'--ring_degree={r_deg}',
-                    '--no_use_resolution_binning',
-                ]
-
-                if config_xdit["use_cfg_parallel"]:
-                    cmd.append("--use_cfg_parallel")
-
-                if self.low_vram:
-                    #cmd.append('--enable_model_cpu_offload')
-                    #cmd.append('--enable_sequential_cpu_offload')
-                    #cmd.append('--enable_tiling')
-                    #cmd.append('--enable_slicing')
-                    cmd.append('--xformers_efficient')
-
-                if config_xdit["quantize_encoder"]:
-                    cmd.append("--quantize_encoder")
-                    cmd.append(f'--quantize_encoder_type={config_xdit["quantize_encoder_type"]}')
-
-            cmd.append(f'--warm_up_steps={config_global["warm_up_steps"]}')
-
-            if config_global["use_compel"] and self.process_type != 2:
-                cmd.append('--compel')
-
-            if len(self.loras) > 0:
-                cmd.append(f'--lora={json.dumps(self.loras)}')
-
-            if self.scheduler is not None and len(self.scheduler) > 0 and self.pipeline_type in ['sd1', 'sd2', 'sd3', 'sdup', 'sdxl']:
-                cmd.append(f'--scheduler={self.scheduler}')
-
-            kill_process()
-
-            global process
-            logger.info("Starting torch instance:\n" + str(cmd))
-            process = subprocess.Popen(cmd, stdout=sys.stdout, stderr=subprocess.STDOUT)
-            initialize_url = f"{URL}/initialize"
-            time_elapsed = 0
-            while True:
-                time.sleep(5)
-                time_elapsed += 5
-                try:
-                    response = requests.get(initialize_url)
-                    if response.status_code == 200 and response.json().get("status") == "initialized":
-                        self.loaded = True
-                        self.needs_reload = False
-                        logger.info("Torch instance started successfully")
-                        break
-                except requests.exceptions.RequestException:
-                    if time_elapsed > config_global["host_init_timeout"]:
-                        kill_process()
-                        self.log_reload_reason('Torch instance start has timed out (config_global["host_init_timeout"]s)')
-                        return backend_pb2.Result(message=f'Failed to launch host within {config_global["host_init_timeout"]} seconds', success=False)
-                    else:
-                        logger.info(f'Waiting on torch instance init ({time_elapsed}s/{config_global["host_init_timeout"]}s)')
-                        pass
+                config = {}
+                self.launch_host(config, "xdit")
 
         if self.loaded:
             url = f"{URL}/generate"
 
-            if self.pipeline_type in ["sdup", "svd"]:
+            if self.type in ["sdup", "svd"]:
                 if self.low_vram and config_asyncdiff["chunk_size"] >= 2:
                     decode_chunk_size = 2
                 else:
@@ -385,27 +267,23 @@ class BackendServicer(backend_pb2_grpc.BackendServicer):
 
                 data = {
                     "image": request.src,
-                    "width": self.width,
-                    "height": self.height,
-                    "num_inference_steps": request.step,
+                    "steps": request.step,
                     "seed": request.seed,
                     "cfg": self.cfg_scale,
                     "decode_chunk_size": decode_chunk_size,
-                    "num_frames": config_asyncdiff["frames"],
+                    "frames": config_asyncdiff["frames"],
                     "motion_bucket_id": config_asyncdiff["motion_bucket_id"],
                     "noise_aug_strength": config_asyncdiff["noise_aug_strength"],
                     "output_path": request.dst,
                 }
 
                 if request.positive_prompt and len(request.positive_prompt) > 0:
-                    data["positive_prompt"] = request.positive_prompt
+                    data["positive"] = request.positive_prompt
 
             else:
                 data = {
-                    "positive_prompt": request.positive_prompt,
-                    "num_inference_steps": request.step,
-                    "width": self.width,
-                    "height": self.height,
+                    "positive": request.positive_prompt,
+                    "steps": request.step,
                     "seed": request.seed,
                     "cfg": self.cfg_scale,
                     "clip_skip": self.clip_skip,
@@ -413,7 +291,7 @@ class BackendServicer(backend_pb2_grpc.BackendServicer):
                 }
 
             if request.negative_prompt and len(request.negative_prompt) > 0:
-                data["negative_prompt"] = request.negative_prompt
+                data["negative"] = request.negative_prompt
 
             logger.info("Sending request to {url} with params:\n" + str(data))
             try:
@@ -453,6 +331,95 @@ class BackendServicer(backend_pb2_grpc.BackendServicer):
                 return backend_pb2.Result(message="No image generated", success=False)
         else:
             return backend_pb2.Result(message="Host is not loaded", success=False)
+
+
+    def launch_host(self, config, name):
+        global process, config_asyncdiff, config_distrifuser, config_xdit, config_global
+        cmd = ['torchrun', f'--nproc_per_node={self.nproc_per_node}', f'--master-port={config_global["master_port"]}', f'host_{name}.py']
+
+        for k,v in config.items(): cmd.append(f'--{k}={v}')
+
+        # asyncdiff
+        if name == "asyncdiff":
+            cmd.append(f'--time_shift={config_asyncdiff["time_shift"]}')
+
+        # distrifuser
+        elif name == "distrifuser":
+            cmd.append(f'--sync_mode={config_distrifuser["sync_mode"]}')
+            cmd.append(f'--parallelism={config_distrifuser["parallelism"]}')
+            cmd.append(f'--split_scheme={config_distrifuser["split_scheme"]}')
+            if config_distrifuser["no_split_batch"]:    cmd.append('--no_split_batch')
+            if config_distrifuser["no_cuda_graph"]:     cmd.append('--no_cuda_graph')
+
+        # xdit
+        elif name == "xdit":
+            cmd.append(f'--pipefusion_parallel_degree={config_xdit["pipefusion_parallel_degree"]}')
+            cmd.append(f'--tensor_parallel_degree={config_xdit["tensor_parallel_degree"]}')
+            cmd.append(f'--data_parallel_degree={config_xdit["data_parallel_degree"]}')
+            cmd.append(f'--ulysses_degree={config_xdit["ulysses_degree"]}')
+            cmd.append(f'--ring_degree={config_xdit["ring_degree"]}')
+            cmd.append('--no_use_resolution_binning')
+            if config_xdit["use_cfg_parallel"]:         cmd.append("--use_cfg_parallel")
+
+        # generic
+        cmd.append(f'--port={config_global["port"]}')
+        cmd.append(f'--model={self.model}')
+        cmd.append(f'--type={self.type}')
+        cmd.append(f'--variant={self.variant}')
+        cmd.append(f'--height={self.height}')
+        cmd.append(f'--width={self.width}')
+        for k,v in config_extra.items():                cmd.append(f'--{k}={v}')
+
+        if self.controlnet is not None:                 cmd.append(f'--controlnet={self.controlnet}')
+
+        if self.low_vram:
+            cmd.append('--enable_vae_tiling')
+            cmd.append('--enable_vae_slicing')
+            cmd.append('--xformers_efficient')
+
+        if config_global["compile_unet"]:               cmd.append('--compile_unet')
+        if config_global["compile_vae"]:                cmd.append('--compile_vae')
+        if config_global["compile_text_encoder"]:       cmd.append('--compile_text_encoder')
+
+        if config_global["quantize_encoder"]:
+            cmd.append("--quantize_encoder")
+            cmd.append(f'--quantize_encoder_type={config_global["quantize_encoder_type"]}')
+
+        cmd.append(f'--warm_up_steps={config_global["warm_up_steps"]}')
+
+        if config_global["use_compel"] and self.process_type != 2:
+            cmd.append('--compel')
+
+        if len(self.loras) > 0:
+            cmd.append(f'--lora={json.dumps(self.loras)}')
+
+        if self.scheduler is not None and len(self.scheduler) > 0 and self.type in ['sd1', 'sd2', 'sd3', 'sdup', 'sdxl']:
+            cmd.append(f'--scheduler={self.scheduler}')
+
+        kill_process()
+
+        global process
+        logger.info("Starting torch instance:\n" + str(cmd))
+        process = subprocess.Popen(cmd, stdout=sys.stdout, stderr=subprocess.STDOUT)
+        initialize_url = f"{URL}/initialize"
+        time_elapsed = 0
+        while True:
+            time.sleep(5)
+            time_elapsed += 5
+            try:
+                response = requests.get(initialize_url)
+                if response.status_code == 200:
+                    self.loaded = True
+                    self.needs_reload = False
+                    logger.info("Torch instance started successfully")
+                    return
+            except requests.exceptions.RequestException:
+                if time_elapsed > config_global["host_init_timeout"]:
+                    kill_process()
+                    self.log_reload_reason('Torch instance start has timed out (config_global["host_init_timeout"]s)')
+                    return backend_pb2.Result(message=f'Failed to launch host within {config_global["host_init_timeout"]} seconds', success=False)
+                else:
+                    logger.info(f'Waiting on torch instance init ({time_elapsed}s/{config_global["host_init_timeout"]}s)')
 
 
 def serve(address):
