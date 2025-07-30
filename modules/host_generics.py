@@ -12,13 +12,14 @@ GENERIC_HOST_ARGS = {
     "type":                     str,
     "variant":                  str,
     "scheduler":                str,
-    "quantize_encoder_type":    str,
+    "quantize_to":              str,
     "model":                    str,    # path
     "gguf_model":               str,    # path
     "motion_adapter":           str,    # path
     "control_net":              str,    # path
     "lora":                     str,    # json dict > path, scale
     "ip_adapter":               str,    # json dict > path, scale
+    "image_scale":              float,
     
 }
 
@@ -31,7 +32,6 @@ GENERIC_HOST_ARGS_TOGGLES = [
     "compile_unet",
     "compile_vae",
     "compile_text_encoder",
-    "quantize_encoder",
 ]
 
 

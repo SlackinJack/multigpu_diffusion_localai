@@ -1,40 +1,9 @@
 {
     "global": {
         "cuda_devices": "",
-        "host_init_timeout": 600,
+        "host_init_timeout": 1200,
         "port": 6000,
         "master_port": 29400,
-        "grpc_port": 50050,
-        "use_compel": true,
-        "warm_up_steps": 20,
-        "compile_unet": false,
-        "compile_vae": true,
-        "compile_text_encoder": true,
-        "quantize_encoder": true,
-        "quantize_encoder_type": "int8"
-    },
-    "asyncdiff": {
-        "chunk_size": 8,
-        "motion_bucket_id": 180,
-        "noise_aug_strength": 0.01,
-        "frames": 25,
-        "time_shift": true,
-        "controlnet_scale": 1.0,
-        "video_output_type": "gif"
-    },
-    "distrifuser": {
-        "sync_mode": "corrected_async_gn",
-        "parallelism": "patch",
-        "split_scheme": "row",
-        "no_split_batch": false,
-        "no_cuda_graph": true
-    },
-    "xdit": {
-        "pipefusion_parallel_degree": 4,
-        "tensor_parallel_degree": 1,
-        "data_parallel_degree": 1,
-        "ulysses_degree": 1,
-        "ring_degree": 1,
-        "use_cfg_parallel": false
+        "grpc_port": 50050
     }
 }

@@ -82,8 +82,8 @@ def initialize():
 
     # quantize
     q_config = None
-    if args.quantize_encoder:
-        q_config = QuantoConfig(weights_dtype=args.quantize_encoder_type, activations_dtype=args.quantize_encoder_type)
+    if args.quantize_to:
+        q_config = QuantoConfig(weights_dtype=args.quantize_to, activations_dtype=args.quantize_to)
 
     # set distrifuser
     distri_config = DistriConfig(
@@ -227,16 +227,15 @@ def generate_image():
 
     params = [positive, negative, steps, seed, cfg, clip_skip]
     dist.broadcast_object_list(params, src=0)
-
+    logger.info("Parameters broadcasted to all processes")
     output = generate_image_parallel(*params)
     pickled_image = pickle.dumps(output)
     output_base64 = base64.b64encode(pickled_image).decode('utf-8')
-
     response = {
         "output": output_base64,
         "is_image": True,
     }
-
+    logger.info("Sending response")
     return jsonify(response)
 
 

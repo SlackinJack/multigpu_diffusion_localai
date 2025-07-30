@@ -91,8 +91,8 @@ def initialize():
 
     # quantize
     q_config = None
-    if args.quantize_encoder:
-        q_config = QuantoConfig(weights_dtype=args.quantize_encoder_type, activations_dtype=args.quantize_encoder_type)
+    if args.quantize_to:
+        q_config = QuantoConfig(weights_dtype=args.quantize_to, activations_dtype=args.quantize_to)
 
     # set control net
     controlnet_model = None
@@ -252,7 +252,8 @@ def initialize():
     # compiles
     if args.compile_unet:           compile_unet(pipe, adapter_names)
     if args.compile_vae:            compile_vae(pipe)
-    if args.compile_text_encoder:   compile_text_encoder(pipe)
+    if args.type not in ["svd"]:
+        if args.compile_text_encoder:   compile_text_encoder(pipe)
 
     # set progress bar visibility
     pipe.set_progress_bar_config(disable=dist.get_rank() != 0)
@@ -353,9 +354,9 @@ def generate_image_parallel(positive, negative, image, steps, cfg, control_net_s
     if (args.type in ["sdup", "svd"]) or (args.type == "ad" and args.ip_adapter is not None):
         assert image is not None, "No image provided for an image pipeline."
         image = load_image(image)
-        #if args.scale_input:
-        #    percentage = args.scale_percentage / 100
-        #    image = image.resize((int(image.size[0] * percentage), int(image.size[1] * percentage)), Image.Resampling.LANCZOS)
+        if args.image_scale and args.image_scale != 100:
+            percentage = args.image_scale / 100
+            image = image.resize((int(image.size[0] * percentage), int(image.size[1] * percentage)), Image.Resampling.LANCZOS)
 
     match args.type:
         case "ad":

@@ -111,20 +111,20 @@ def initialize():
 
     # init distributed inference
     # remove all our args before passing it to xdit
-    xfuser_args = copy.deepcopy(args)
-    del xfuser_args.gguf_model
-    del xfuser_args.scheduler
-    del xfuser_args.warm_up_steps
-    del xfuser_args.port
-    del xfuser_args.variant
-    del xfuser_args.type
-    del xfuser_args.lora
-    del xfuser_args.compile_unet
-    del xfuser_args.compile_vae
-    del xfuser_args.compile_text_encoder
-    del xfuser_args.quantize_encoder
-    del xfuser_args.quantize_encoder_type
-    engine_args = xFuserArgs.from_cli_args(xfuser_args)
+    xargs = copy.deepcopy(args)
+    del xargs.gguf_model
+    del xargs.scheduler
+    del xargs.warm_up_steps
+    del xargs.port
+    del xargs.variant
+    del xargs.type
+    del xargs.lora
+    del xargs.compile_unet
+    del xargs.compile_vae
+    del xargs.compile_text_encoder
+    del xargs.quantize_to
+    del xargs.image_scale
+    engine_args = xFuserArgs.from_cli_args(xargs)
     engine_config, input_config = engine_args.create_config()
     engine_config.runtime_config.dtype = torch_dtype
     local_rank = int(os.environ.get("LOCAL_RANK"))
@@ -133,12 +133,12 @@ def initialize():
 
     # quantize
     q_config = None
-    if args.quantize_encoder:
-        q_config = QuantoConfig(weights_dtype=args.quantize_encoder_type, activations_dtype=args.quantize_encoder_type)
+    if args.quantize_to:
+        q_config = QuantoConfig(weights_dtype=args.quantize_to, activations_dtype=args.quantize_to)
 
     def do_quantization(model, desc):
-        logging.info(f"rank {local_rank} quantizing {desc} to {args.quantize_encoder_type}")
-        weights = get_encoder_type(args.quantize_encoder_type)
+        logging.info(f"rank {local_rank} quantizing {desc} to {args.quantize_to}")
+        weights = get_encoder_type(args.quantize_to)
         quantize(model, weights=weights)
         freeze(model)
 
@@ -158,7 +158,7 @@ def initialize():
                     quantization_config=GGUFQuantizationConfig(compute_dtype=torch_dtype),
                 )
             if using_gguf:
-                if args.quantize_encoder:
+                if args.quantize_to:
                     text_encoder_2 = T5EncoderModel.from_pretrained(args.model, subfolder="text_encoder_2", torch_dtype=torch_dtype)
                     do_quantization(text_encoder_2, "text_encoder_2")
                     pipe = xFuserFluxPipeline.from_pretrained(
@@ -186,7 +186,7 @@ def initialize():
                         quantization_config=q_config,
                     )
             else:
-                if args.quantize_encoder:
+                if args.quantize_to:
                     text_encoder_2 = T5EncoderModel.from_pretrained(args.model, subfolder="text_encoder_2", torch_dtype=torch_dtype)
                     do_quantization(text_encoder_2, "text_encoder_2")
                     pipe = xFuserFluxPipeline.from_pretrained(
@@ -212,7 +212,7 @@ def initialize():
                         quantization_config=q_config,
                     )
         case "sd3":
-            if args.quantize_encoder:
+            if args.quantize_to:
                 text_encoder_3 = T5EncoderModel.from_pretrained(args.model, subfolder="text_encoder_3", torch_dtype=torch_dtype)
                 do_quantization(text_encoder_3, "text_encoder_3")
                 pipe = xFuserStableDiffusion3Pipeline.from_pretrained(
@@ -347,24 +347,14 @@ def generate_image():
     seed                = data.get("seed")
     clip_skip           = data.get("clip_skip")
 
-    params = [
-        positive,
-        negative,
-        steps,
-        cfg,
-        seed,
-        clip_skip
-    ]
+    params = [positive, negative, steps, cfg, seed, clip_skip]
     dist.broadcast_object_list(params, src=0)
     logger.info("Parameters broadcasted to all processes")
-
     output_base64, is_image = generate_image_parallel(*params)
-
     response = {
         "output": output_base64,
         "is_image": is_image,
     }
-
     logger.info("Sending response")
     return jsonify(response)
 
