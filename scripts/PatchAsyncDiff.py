@@ -16,6 +16,12 @@ patches = [
                 "from": "self.pipe_id = pipeline.config._name_or_path",
                 "to":   "self.pipe_id = pipeline_type",
             },
+            # Increase torch timeout to 1 day
+            {
+                "from": 'dist.init_process_group("nccl")',
+                "to":   """from datetime import timedelta
+        dist.init_process_group("nccl", timeout=timedelta(days=1))""",
+            },
         ],
     },
     {
@@ -30,6 +36,12 @@ patches = [
             {
                 "from": "self.pipe_id = pipeline.config._name_or_path",
                 "to":   "self.pipe_id = pipeline_type",
+            },
+            # Increase torch timeout to 1 day
+            {
+                "from": 'dist.init_process_group("nccl")',
+                "to":   """from datetime import timedelta
+        dist.init_process_group("nccl", timeout=timedelta(days=1))""",
             },
         ],
     },

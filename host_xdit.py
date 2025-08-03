@@ -338,24 +338,20 @@ def set_result():
 
 @app.route("/generate", methods=["POST"])
 def generate_image():
-    logger.info("Received POST request for image generation")
     data = request.json
     positive            = data.get("positive")
     negative            = data.get("negative")
     steps               = data.get("steps")
-    cfg                 = data.get("cfg",)
     seed                = data.get("seed")
+    cfg                 = data.get("cfg")
     clip_skip           = data.get("clip_skip")
 
-    params = [positive, negative, steps, cfg, seed, clip_skip]
+    assert (image is not None or (positive is not None and len(positive) > 0)), "No input provided"
+
+    params = [positive, negative, steps, seed, cfg, clip_skip]
     dist.broadcast_object_list(params, src=0)
-    logger.info("Parameters broadcasted to all processes")
     output_base64, is_image = generate_image_parallel(*params)
-    response = {
-        "output": output_base64,
-        "is_image": is_image,
-    }
-    logger.info("Sending response")
+    response = { "output": output_base64, "is_image": is_image }
     return jsonify(response)
 
 

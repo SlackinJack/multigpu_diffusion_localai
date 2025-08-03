@@ -144,6 +144,17 @@ patches = [
             },
         ],
     },
+    {
+        "file_name": f"{root}/utils.py",
+        "replace": [
+            # Increase torch timeout to 1 day
+            {
+                "from": 'dist.init_process_group("nccl")',
+                "to":   """from datetime import timedelta
+            dist.init_process_group("nccl", timeout=timedelta(days=1))""",
+            },
+        ],
+    },
 ]
 
 FilePatcher.patch(patches)

@@ -132,7 +132,7 @@ def initialize():
         adapter_names = load_lora(args.lora, pipe.pipeline, local_rank)
 
     # compiles
-    if args.compile_unet:           compile_unet(pipe.pipeline, adapter_names)
+    if args.compile_unet:           compile_unet(pipe.pipeline, adapter_names, is_distrifuser=True)
     if args.compile_vae:            compile_vae(pipe.pipeline)
     if args.compile_text_encoder:   compile_text_encoder(pipe.pipeline)
 
@@ -210,32 +210,27 @@ def generate_image_parallel(positive, negative, steps, seed, cfg, clip_skip):
         output = pickle.loads(output_bytes.cpu().numpy().tobytes())
         if output is not None:
             output = output.images[0]
-
-    return output
+            pickled_image = pickle.dumps(output)
+            output_base64 = base64.b64encode(pickled_image).decode('utf-8')
+            return output_base64
 
 
 @app.route("/generate", methods=["POST"])
 def generate_image():
-    logger.info("Received POST request for image generation")
     data = request.json
     positive            = data.get("positive")
     negative            = data.get("negative")
     steps               = data.get("steps")
     seed                = data.get("seed")
-    cfg                 = data.get("cfg",)
+    cfg                 = data.get("cfg")
     clip_skip           = data.get("clip_skip")
+
+    assert (positive is not None and len(positive) > 0), "No input provided"
 
     params = [positive, negative, steps, seed, cfg, clip_skip]
     dist.broadcast_object_list(params, src=0)
-    logger.info("Parameters broadcasted to all processes")
-    output = generate_image_parallel(*params)
-    pickled_image = pickle.dumps(output)
-    output_base64 = base64.b64encode(pickled_image).decode('utf-8')
-    response = {
-        "output": output_base64,
-        "is_image": True,
-    }
-    logger.info("Sending response")
+    output_base64 = generate_image_parallel(*params)
+    response = { "output": output_base64, "is_image": True }
     return jsonify(response)
 
 

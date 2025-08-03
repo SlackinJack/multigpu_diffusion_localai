@@ -476,8 +476,6 @@ def generate_image_parallel(positive, negative, image, steps, cfg, control_net_s
 @app.route("/generate", methods=["POST"])
 def generate_image():
     args = get_args()
-
-    logger.info("Received POST request for image generation")
     data = request.json
     positive            = data.get("positive")
     negative            = data.get("negative")
@@ -492,18 +490,13 @@ def generate_image():
     motion_bucket_id    = data.get("motion_bucket_id")
     noise_aug_strength  = data.get("noise_aug_strength")
 
-    assert (image is not None or len(positive) > 0), "No input provided"
+    assert (image is not None or (positive is not None and len(positive) > 0)), "No input provided"
     if image is not None: image = Image.open(image)
 
     params = [positive, negative, image, steps, cfg, controlnet_scale, seed, frames, decode_chunk_size, clip_skip, motion_bucket_id, noise_aug_strength]
     dist.broadcast_object_list(params, src=0)
     output_base64, is_image = generate_image_parallel(*params)
-
-    response = {
-        "output": output_base64,
-        "is_image": is_image,
-    }
-
+    response = { "output": output_base64, "is_image": is_image }
     return jsonify(response)
 
 

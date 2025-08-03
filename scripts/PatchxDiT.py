@@ -75,7 +75,29 @@ patches = [
             )"""
             }
         ]
-    }
+    },
+    {
+        "file_name": f"{root}/core/distributed/parallel_state.py",
+        "replace": [
+            # Increase torch timeout to 1 day
+            {
+                "from": """torch.distributed.init_process_group(
+            backend=backend,
+            init_method=distributed_init_method,
+            world_size=world_size,
+            rank=rank,
+        )""",
+                "to":   """from datetime import timedelta
+        torch.distributed.init_process_group(
+            timeout=timedelta(days=1),
+            backend=backend,
+            init_method=distributed_init_method,
+            world_size=world_size,
+            rank=rank,
+        )""",
+            },
+        ],
+    },
 ]
 
 FilePatcher.patch_wildcard(root, target_type, patches_wildcard)
