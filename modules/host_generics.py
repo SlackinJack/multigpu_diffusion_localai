@@ -4,9 +4,8 @@ import torch
 from optimum.quanto import qint2, qint4, qint8, qfloat8
 
 
-TORCH_COMPILER_BACKEND = "eager" #"aot_eager"
-TORCH_COMPILER_MODE = None #"max-autotune-no-cudagraphs"
-TORCH_COMPILER_FULLGRAPH = False
+config              =   json.load(open("../config.json"))
+config_compiler     =   config["compiler"]
 
 
 GENERIC_HOST_ARGS = {
@@ -78,40 +77,38 @@ def load_lora(lora_dict, pipe, local_rank):
 
 
 def compile_unet(pipe, adapter_names, is_distrifuser=False):
-    global TORCH_COMPILER_BACKEND, TORCH_COMPILER_MODE, TORCH_COMPILER_FULLGRAPH
+    global config_compiler
+    backend         = config_compiler["backend"]
+    mode            = config_compiler["mode"]
+    fullgraph       = config_compiler["fullgraph"]
     if adapter_names:
         if is_distrifuser:  pipe.unet.model.fuse_lora(adapter_names=adapter_names, lora_scale=1.0)
         else:               pipe.unet.fuse_lora(adapter_names=adapter_names, lora_scale=1.0)
         pipe.unload_lora_weights()
-    #pipe.unet.model.to(memory_format=torch.channels_last)
     if is_distrifuser:
-        if TORCH_COMPILER_MODE is not None:
-            pipe.unet.model = torch.compile(pipe.unet.model, backend=TORCH_COMPILER_BACKEND, mode=TORCH_COMPILER_MODE, fullgraph=TORCH_COMPILER_FULLGRAPH)
-        else:
-            pipe.unet.model = torch.compile(pipe.unet.model, backend=TORCH_COMPILER_BACKEND, fullgraph=TORCH_COMPILER_FULLGRAPH)
+        if len(mode) > 0:   pipe.unet.model = torch.compile(pipe.unet.model, backend=backend, mode=mode, fullgraph=fullgraph)
+        else:               pipe.unet.model = torch.compile(pipe.unet.model, backend=backend, fullgraph=fullgraph)
     else:
-        if TORCH_COMPILER_MODE is not None:
-            pipe.unet = torch.compile(pipe.unet, backend=TORCH_COMPILER_BACKEND, mode=TORCH_COMPILER_MODE, fullgraph=TORCH_COMPILER_FULLGRAPH)
-        else:
-            pipe.unet = torch.compile(pipe.unet, backend=TORCH_COMPILER_BACKEND, fullgraph=TORCH_COMPILER_FULLGRAPH)
+        if len(mode) > 0:   pipe.unet = torch.compile(pipe.unet, backend=backend, mode=mode, fullgraph=fullgraph)
+        else:               pipe.unet = torch.compile(pipe.unet, backend=backend, fullgraph=fullgraph)
     return
 
 
 def compile_vae(pipe):
-    global TORCH_COMPILER_BACKEND, TORCH_COMPILER_MODE, TORCH_COMPILER_FULLGRAPH
-    #pipe.vae.to(memory_format=torch.channels_last)
-    if TORCH_COMPILER_MODE is not None:
-        pipe.vae = torch.compile(pipe.vae, backend=TORCH_COMPILER_BACKEND, mode=TORCH_COMPILER_MODE, fullgraph=TORCH_COMPILER_FULLGRAPH)
-    else:
-        pipe.vae = torch.compile(pipe.vae, backend=TORCH_COMPILER_BACKEND, fullgraph=TORCH_COMPILER_FULLGRAPH)
+    global config_compiler
+    backend         = config_compiler["backend"]
+    mode            = config_compiler["mode"]
+    fullgraph       = config_compiler["fullgraph"]
+    if len(mode) > 0:           pipe.vae = torch.compile(pipe.vae, backend=backend, mode=mode, fullgraph=fullgraph)
+    else:                       pipe.vae = torch.compile(pipe.vae, backend=backend, fullgraph=fullgraph)
     return
 
 
 def compile_text_encoder(pipe):
-    global TORCH_COMPILER_BACKEND, TORCH_COMPILER_MODE, TORCH_COMPILER_FULLGRAPH
-    #pipe.text_encoder.to(memory_format=torch.channels_last)
-    if TORCH_COMPILER_MODE is not None:
-        pipe.text_encoder = torch.compile(pipe.text_encoder, backend=TORCH_COMPILER_BACKEND, mode=TORCH_COMPILER_MODE, fullgraph=TORCH_COMPILER_FULLGRAPH)
-    else:
-        pipe.text_encoder = torch.compile(pipe.text_encoder, backend=TORCH_COMPILER_BACKEND, fullgraph=TORCH_COMPILER_FULLGRAPH)
+    global config_compiler
+    backend         = config_compiler["backend"]
+    mode            = config_compiler["mode"]
+    fullgraph       = config_compiler["fullgraph"]
+    if len(mode) > 0:           pipe.text_encoder = torch.compile(pipe.text_encoder, backend=backend, mode=mode, fullgraph=fullgraph)
+    else:                       pipe.text_encoder = torch.compile(pipe.text_encoder, backend=backend, fullgraph=fullgraph)
     return

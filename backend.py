@@ -268,24 +268,6 @@ class BackendServicer(backend_pb2_grpc.BackendServicer):
 
             elif self.process_type == 2:
                 logging.info("Using xDiT host for pipeline type: " + self.type)
-                """
-                    Support for parallelism techniques (as per xDiT README, at the time of writing):
-                        - Tensor Parallel:
-                            - StepVideo
-                        - PipeFusion:
-                            - Hunyuan
-                            - Flux
-                            - PixArt
-                            - SD3
-                        - CFG Parallel:
-                            - ConsisID
-                            - CogVideoX
-                            - Mochi
-                            - Hunyuan
-                            - PixArt
-                            - SD3
-                            - SDXL
-                """
                 self.launch_host("xdit")
 
         if self.loaded:
