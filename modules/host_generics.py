@@ -4,7 +4,7 @@ import torch
 from optimum.quanto import qint2, qint4, qint8, qfloat8
 
 
-config              =   json.load(open("../config.json"))
+config              =   json.load(open("config.json"))
 config_compiler     =   config["compiler"]
 
 
