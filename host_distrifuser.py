@@ -1,18 +1,14 @@
 import argparse
 import base64
-import json
 import logging
 import os
 import pickle
-import safetensors
-import time
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 from compel import Compel, ReturnedEmbeddingsType
-from diffusers import AutoencoderKL, QuantoConfig
+from diffusers import QuantoConfig
 from flask import Flask, request, jsonify
-from PIL import Image
 
 from DistriFuser.distrifuser.utils import DistriConfig
 from DistriFuser.distrifuser.pipelines import DistriSDPipeline, DistriSDXLPipeline
@@ -43,7 +39,7 @@ def get_args():
                                                                                             "no_sync"
                                                                                         ])
     # generic
-    for k,v in GENERIC_HOST_ARGS.items():   parser.add_argument(f"--{k}", type=v, default=None)
+    for k, v in GENERIC_HOST_ARGS.items():  parser.add_argument(f"--{k}", type=v, default=None)
     for e in GENERIC_HOST_ARGS_TOGGLES:     parser.add_argument(f"--{e}", action="store_true")
     args = parser.parse_args()
     return args
@@ -83,7 +79,7 @@ def initialize():
     # quantize
     q_config = None
     if args.quantize_to:
-        q_config = QuantoConfig(weights_dtype=args.quantize_to, activations_dtype=args.quantize_to)
+        q_config = QuantoConfig(weights_dtype=args.quantize_to)
 
     # set distrifuser
     distri_config = DistriConfig(
@@ -197,7 +193,7 @@ def generate_image_parallel(positive, negative, steps, seed, cfg, clip_skip):
         dist.send(torch.tensor(len(output_bytes), device=f"cuda:{local_rank}"), dst=0)
         dist.send(torch.ByteTensor(list(output_bytes)).to(f"cuda:{local_rank}"), dst=0)
 
-        logger.info(f"Output sent to rank 0")
+        logger.info("Output sent to rank 0")
 
     elif dist.get_rank() == 0 and dist.get_world_size() > 1:
         # recv from rank world_size - 1

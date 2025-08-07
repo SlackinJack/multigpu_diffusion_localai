@@ -4,8 +4,6 @@ import json
 import logging
 import os
 import pickle
-import safetensors
-import time
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
@@ -13,7 +11,6 @@ from compel import Compel, ReturnedEmbeddingsType
 from diffusers import (
     AnimateDiffControlNetPipeline,
     AnimateDiffPipeline,
-    AutoencoderKL,
     ControlNetModel,
     MotionAdapter,
     QuantoConfig,
@@ -52,7 +49,7 @@ def get_args():
     parser.add_argument("--warm_up", type=int, default=3)
     parser.add_argument("--time_shift", type=bool, default=False)
     # generic
-    for k,v in GENERIC_HOST_ARGS.items():   parser.add_argument(f"--{k}", type=v, default=None)
+    for k, v in GENERIC_HOST_ARGS.items():  parser.add_argument(f"--{k}", type=v, default=None)
     for e in GENERIC_HOST_ARGS_TOGGLES:     parser.add_argument(f"--{e}", action="store_true")
     args = parser.parse_args()
     return args
@@ -92,7 +89,7 @@ def initialize():
     # quantize
     q_config = None
     if args.quantize_to:
-        q_config = QuantoConfig(weights_dtype=args.quantize_to, activations_dtype=args.quantize_to)
+        q_config = QuantoConfig(weights_dtype=args.quantize_to)
 
     # set control net
     controlnet_model = None
@@ -130,7 +127,7 @@ def initialize():
             )
             if args.ip_adapter is not None:
                 ip_adapter = json.loads(args.ip_adapter)
-                for m,s in ip_adapter.items():
+                for m, s in ip_adapter.items():
                     split = m.split("/")
                     ip_adapter_file = split[-1]
                     ip_adapter_subfolder = split[-2]
@@ -209,7 +206,7 @@ def initialize():
         case _: raise NotImplementedError
 
     # memory saving functions
-    if not args.type in ["svd"]:
+    if args.type not in ["svd"]:
         if args.enable_vae_slicing: pipe.enable_vae_slicing()
         if args.enable_vae_tiling:  pipe.enable_vae_tiling()
         if args.xformers_efficient: pipe.enable_xformers_memory_efficient_attention()
@@ -464,7 +461,7 @@ def generate_image_parallel(positive, negative, image, steps, cfg, control_net_s
     torch.cuda.empty_cache()
 
     if dist.get_rank() == 0:
-        is_image = not args.type in ["ad", "svd"]
+        is_image = args.type not in ["ad", "svd"]
         if output is not None:
             pickled = pickle.dumps(output)
             output_base64 = base64.b64encode(pickled).decode('utf-8')

@@ -62,7 +62,7 @@ def load_lora(lora_dict, pipe, local_rank):
         if m.endswith(".safetensors"):  weights = safetensors.torch.load_file(m, device=f'cuda:{local_rank}')
         else:                           weights = torch.load(m, map_location=torch.device(f'cuda:{local_rank}'))
         w = m.split("/")[-1]
-        a = weight_name if not "." in w else w.split(".")[0]
+        a = w if not "." in w else w.split(".")[0]
         names.append(a)
         pipe.load_lora_weights(weights, weight_name=w, adapter_name=a)
         #logger.info(f"Added LoRA[{i}], scale={s}: {m}")

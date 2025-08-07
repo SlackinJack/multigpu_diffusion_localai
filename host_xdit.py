@@ -1,21 +1,14 @@
-import argparse
 import base64
 import copy
-import io
-import json
 import logging
 import os
 import pickle
 import requests
-import safetensors
-import time
 import torch
 import torch.distributed as dist
-import torch.multiprocessing as mp
-from diffusers import AutoencoderKL, FluxTransformer2DModel, GGUFQuantizationConfig, QuantoConfig
+from diffusers import FluxTransformer2DModel, GGUFQuantizationConfig, QuantoConfig
 from flask import Flask, request, jsonify
 from optimum.quanto import freeze, quantize
-from PIL import Image
 from transformers import T5EncoderModel
 
 from xDiT.xfuser import xFuserFluxPipeline, xFuserStableDiffusion3Pipeline, xFuserArgs
@@ -77,7 +70,7 @@ def get_args():
         [--coco_path COCO_PATH] [--use_cache]
     """
     #generic
-    for k,v in GENERIC_HOST_ARGS.items():
+    for k, v in GENERIC_HOST_ARGS.items():
         if k not in ["height", "width", "model"]:
             parser.add_argument(f"--{k}", type=v, default=None)
     for e in GENERIC_HOST_ARGS_TOGGLES:     parser.add_argument(f"--{e}", action="store_true")
@@ -134,7 +127,7 @@ def initialize():
     # quantize
     q_config = None
     if args.quantize_to:
-        q_config = QuantoConfig(weights_dtype=args.quantize_to, activations_dtype=args.quantize_to)
+        q_config = QuantoConfig(weights_dtype=args.quantize_to)
 
     def do_quantization(model, desc):
         logging.info(f"rank {local_rank} quantizing {desc} to {args.quantize_to}")
@@ -152,7 +145,7 @@ def initialize():
                     args.gguf_model,
                     torch_dtype=torch_dtype,
                     config=args.model+"/transformer",
-                    #use_safetensors=True,
+                    # use_safetensors=True,
                     local_files_only=True,
                     low_cpu_mem_usage=True,
                     quantization_config=GGUFQuantizationConfig(compute_dtype=torch_dtype),

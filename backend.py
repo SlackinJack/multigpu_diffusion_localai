@@ -16,8 +16,6 @@ import time
 import torch
 from concurrent import futures
 from diffusers.utils import export_to_video, export_to_gif
-from pathlib import Path
-from PIL import Image
 
 
 os.environ["TORCH_NCCL_BLOCKING_WAIT"] = "1"
@@ -348,7 +346,7 @@ class BackendServicer(backend_pb2_grpc.BackendServicer):
         cmd.append(f'--type={self.type}')
         cmd.append(f'--height={self.height}')
         cmd.append(f'--width={self.width}')
-        for k,v in config_options.items():
+        for k, v in config_options.items():
             if k not in NON_ARG_OPTIONS:
                 if len(v) > 0:  cmd.append(f'--{k}={v}')
                 else:           cmd.append(f'--{k}')
