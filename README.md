@@ -10,6 +10,7 @@ A custom LocalAI backend comprised of various multi-GPU Diffusion solutions.
 - Clone this repo inside LocalAI/backend/python folder.
 - Run `setup.sh`.
 - Edit `config.json`.
+- Check `sample` folder for a sample model configuration.
 
 ## Currently Supported Models:
 - Stable Diffusion 1.5 (sd1) (AsyncDiff or DistriFuser)
