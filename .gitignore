@@ -1,8 +1,4 @@
 __pycache__
-AsyncDiff
-AsyncDiff/*
-DistriFuser
-DistriFuser/*
 backend_pb2.py
 backend_pb2_grpc.py
-/.ropeproject/
+
