@@ -40,12 +40,6 @@ config_options      =   {}
         enable_vae_tiling
         enable_vae_slicing
         xformers_efficient
-        frames
-        video_output_type
-        controlnet_scale
-        chunk_size
-        motion_bucket_id
-        noise_aug_strength
         warm_up_steps
 
     ASYNCDIFF OPTIONS
@@ -125,7 +119,7 @@ class BackendServicer(backend_pb2_grpc.BackendServicer):
     # class vars
     loaded = False
     needs_reload = False
-    process_type = -1 # 0 = asyncdiff, 1 = distrifuser, 2 = xDiT
+    process_type = ""
     nproc_per_node = torch.cuda.device_count()
 
 
@@ -151,36 +145,36 @@ class BackendServicer(backend_pb2_grpc.BackendServicer):
         if config_options.get("backend"):
             match config_options["backend"]:
                 case "asyncdiff":
-                    if self.process_type != 0:
+                    if self.process_type != "asyncdiff":
                         self.log_reload_reason(f"Host type changed to AsyncDiff with {self.nproc_per_node} GPUs")
-                        self.process_type = 0
+                        self.process_type = "asyncdiff"
                 case "distrifuser":
-                    if self.process_type != 1:
+                    if self.process_type != "distrifuser":
                         self.log_reload_reason(f"Host type changed to DistriFuser with {self.nproc_per_node} GPUs")
-                        self.process_type = 1
+                        self.process_type = "distrifuser"
                 case "xdit":
-                    if self.process_type != 2:
+                    if self.process_type != "xdit":
                         self.log_reload_reason(f"Host type changed to xDiT with {self.nproc_per_node} GPUs")
-                        self.process_type = 2
+                        self.process_type = "xdit"
                 case _:
                     assert False, f"Unknown backend: {config_options['backend']}"
         else:
             # detect host to use
             if self.type in ["sd1", "sd2", "sdxl"] and not (self.nproc_per_node > 2 and request.LoraAdapters):
                 # distrifuser
-                if self.process_type != 1:
+                if self.process_type != "distrifuser":
                     self.log_reload_reason(f"Host type changed to DistriFuser with {self.nproc_per_node} GPUs")
-                    self.process_type = 1
+                    self.process_type = "distrifuser"
             elif self.type in ["flux", "sd3"]:
                 # xdit
-                if self.process_type != 2:
+                if self.process_type != "xdit":
                     self.log_reload_reason(f"Host type changed to xDiT with {self.nproc_per_node} GPUs")
-                    self.process_type = 2
+                    self.process_type = "xdit"
             elif self.type in ["ad", "sd1", "sd2", "sd3", "sdup", "sdxl", "svd"]:
                 # asyncdiff
-                if self.process_type != 0:
+                if self.process_type != "asyncdiff":
                     self.log_reload_reason(f"Host type changed to AsyncDiff with {self.nproc_per_node} GPUs")
-                    self.process_type = 0
+                    self.process_type = "asyncdiff"
             else:
                 assert False, f"Unsupported pipeline type: {request.PipelineType}"
 
@@ -254,17 +248,17 @@ class BackendServicer(backend_pb2_grpc.BackendServicer):
             self.width = request.width
 
         if not self.loaded or self.needs_reload:
-            if self.process_type == 0:
+            if self.process_type == "asyncdiff":
                 logging.info("Using AsyncDiff host for pipeline type: " + self.type)
                 assert self.nproc_per_node > 1, "AsyncDiff requires at least 2 GPUs."
                 assert self.nproc_per_node < 6, "AsyncDiff does not support more than 5 GPUs. You can set a limit using CUDA_VISIBLE_DEVICES."
                 self.launch_host("asyncdiff")
 
-            elif self.process_type == 1:
+            elif self.process_type == "distrifuser":
                 logging.info("Using DistriFuser host for pipeline type: " + self.type)
                 self.launch_host("distrifuser")
 
-            elif self.process_type == 2:
+            elif self.process_type == "xdit":
                 logging.info("Using xDiT host for pipeline type: " + self.type)
                 self.launch_host("xdit")
 
@@ -351,7 +345,7 @@ class BackendServicer(backend_pb2_grpc.BackendServicer):
                 if len(v) > 0:  cmd.append(f'--{k}={v}')
                 else:           cmd.append(f'--{k}')
 
-        if self.controlnet is not None:                                                         cmd.append(f'--controlnet={self.controlnet}')
+        if self.controlnet is not None:                                                         cmd.append(f'--control_net={self.controlnet}')
         if len(self.loras) > 0:                                                                 cmd.append(f'--lora={json.dumps(self.loras)}')
         if self.scheduler is not None and self.type in ['sd1', 'sd2', 'sd3', 'sdup', 'sdxl']:   cmd.append(f'--scheduler={self.scheduler}')
 
