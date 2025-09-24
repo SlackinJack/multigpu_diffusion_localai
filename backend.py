@@ -108,17 +108,17 @@ def setup_logger():
 # Implement the BackendServicer class with the service methods
 class BackendServicer(backend_pb2_grpc.BackendServicer):
     last = {
-        "height": None,
-        "width": None,
+        "height": 512,
+        "width": 512,
         "model": None,
         "type": None,
-        "cfg_scale": None,
-        "variant": None,
+        "cfg_scale": 7,
+        "variant": "fp16",
         "scheduler": None,
         "loras": None,
         "controlnet": None,
-        "clip_skip": None,
-        "low_vram": None,
+        "clip_skip": 0,
+        "low_vram": False,
     }
 
     # class vars
