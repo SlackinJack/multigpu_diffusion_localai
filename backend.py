@@ -346,7 +346,7 @@ class BackendServicer(backend_pb2_grpc.BackendServicer):
 
         # generic
         cmd.append(f'--port={port}')
-        cmd.append(f'--model={self.last["model"]}')
+        cmd.append(f'--checkpoint={self.last["model"]}')
         cmd.append(f'--type={self.last["type"]}')
         cmd.append(f'--height={self.last["height"]}')
         cmd.append(f'--width={self.last["width"]}')
