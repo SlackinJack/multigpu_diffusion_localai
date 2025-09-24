@@ -25,8 +25,7 @@ os.environ["TORCH_NCCL_ASYNC_ERROR_HANDLING"] = "1"
 #os.environ["NCCL_P2P_DISABLE"] = "0"
 
 
-config              =   json.load(open("config.json"))
-config_global       =   config["global"]
+config              =   json.load(open("multigpu_diffusion/config.json"))
 config_options      =   {}
 """
     GENERIC OPTIONS
@@ -63,6 +62,10 @@ config_options      =   {}
         use_cfg_parallel
 """
 NON_ARG_OPTIONS = [
+    "port",
+    "grpc_port",
+    "master_port",
+    "cuda_devices",
     "backend",
     "frames",
     "video_output_type",
@@ -71,10 +74,11 @@ NON_ARG_OPTIONS = [
     "noise_aug_strength",
 ]
 
-if len(config_global["cuda_devices"]) > 0:  os.environ["CUDA_VISIBLE_DEVICES"] = config_global["cuda_devices"]
 
-
-URL = f'http://localhost:{config_global["port"]}'
+port = 6000
+master_port = 29400
+grpc_port = 50050
+host_init_timeout = 1800
 
 
 _ONE_DAY_IN_SECONDS = 60 * 60 * 24
@@ -103,18 +107,19 @@ def setup_logger():
 
 # Implement the BackendServicer class with the service methods
 class BackendServicer(backend_pb2_grpc.BackendServicer):
-    # pipeline vars
-    height = None
-    width = None
-    model = None
-    cfg_scale = 7
-    type = None
-    scheduler = None
-    variant = "fp16"
-    loras = {}
-    controlnet = None
-    clip_skip = 0
-    low_vram = False
+    last = {
+        "height": None,
+        "width": None,
+        "model": None,
+        "type": None,
+        "cfg_scale": None,
+        "variant": None,
+        "scheduler": None,
+        "loras": None,
+        "controlnet": None,
+        "clip_skip": None,
+        "low_vram": None,
+    }
 
     # class vars
     loaded = False
@@ -142,6 +147,11 @@ class BackendServicer(backend_pb2_grpc.BackendServicer):
             else:
                 config_options[opt] = ""
 
+        if config_options.get("port") is not None:  port = int(config_options["port"])
+        # if config_options.get("grpc_port") is not None: grpc_port = int(config_options["grpc_port"])
+        if config_options.get("master_port") is not None: master_port = int(config_options["master_port"])
+        if config_options.get("cuda_devices") is not None: os.environ["CUDA_VISIBLE_DEVICES"] = config_options["cuda_devices"]
+
         if config_options.get("backend"):
             match config_options["backend"]:
                 case "asyncdiff":
@@ -160,17 +170,17 @@ class BackendServicer(backend_pb2_grpc.BackendServicer):
                     assert False, f"Unknown backend: {config_options['backend']}"
         else:
             # detect host to use
-            if self.type in ["sd1", "sd2", "sdxl"] and not (self.nproc_per_node > 2 and request.LoraAdapters):
+            if self.last["type"] in ["sd1", "sd2", "sdxl"] and not (self.nproc_per_node > 2 and request.LoraAdapters):
                 # distrifuser
                 if self.process_type != "distrifuser":
                     self.log_reload_reason(f"Host type changed to DistriFuser with {self.nproc_per_node} GPUs")
                     self.process_type = "distrifuser"
-            elif self.type in ["flux", "sd3"]:
+            elif self.last["type"] in ["flux", "sd3"]:
                 # xdit
                 if self.process_type != "xdit":
                     self.log_reload_reason(f"Host type changed to xDiT with {self.nproc_per_node} GPUs")
                     self.process_type = "xdit"
-            elif self.type in ["ad", "sd1", "sd2", "sd3", "sdup", "sdxl", "svd"]:
+            elif self.last["type"] in ["ad", "sd1", "sd2", "sd3", "sdup", "sdxl", "svd"]:
                 # asyncdiff
                 if self.process_type != "asyncdiff":
                     self.log_reload_reason(f"Host type changed to AsyncDiff with {self.nproc_per_node} GPUs")
@@ -178,94 +188,94 @@ class BackendServicer(backend_pb2_grpc.BackendServicer):
             else:
                 assert False, f"Unsupported pipeline type: {request.PipelineType}"
 
-        if request.PipelineType != self.type: 
+        if request.PipelineType != self.last["type"]:
             self.log_reload_reason("Pipeline type changed")
-        self.type = request.PipelineType
+        self.last["type"] = request.PipelineType
 
-        if request.CFGScale > 0 and self.cfg_scale != request.CFGScale:
-            self.cfg_scale = request.CFGScale
+        if request.CFGScale > 0 and self.last["cfg_scale"] != request.CFGScale:
+            self.last["cfg_scale"] = request.CFGScale
 
-        if request.Model != self.model or (len(request.ModelFile) > 0 and os.path.exists(request.ModelFile) and request.ModelFile != self.model):
+        if request.Model != self.last["model"] or (len(request.ModelFile) > 0 and os.path.exists(request.ModelFile) and request.ModelFile != self.last["model"]):
             self.log_reload_reason("Model changed")
 
-        self.model = request.Model
+        self.last["model"] = request.Model
         if request.ModelFile != "" and os.path.exists(request.ModelFile):
-            self.model = request.ModelFile
+            self.last["model"] = request.ModelFile
             self.log_reload_reason("Model changed")
 
-        if config_options.get("variant"):
-            if config_options["variant"] != self.variant:
-                if config_options["variant"] == "fp16":    self.variant = "fp16"
-                elif config_options["variant"] == "bf16":  self.variant = "bf16"
-                elif config_options["variant"] == "fp32":  self.variant = "fp32"
+        if config_options.get("variant") is not None:
+            if config_options["variant"] != self.last["variant"]:
+                if config_options["variant"] == "fp16":    self.last["variant"] = "fp16"
+                elif config_options["variant"] == "bf16":  self.last["variant"] = "bf16"
+                elif config_options["variant"] == "fp32":  self.last["variant"] = "fp32"
                 else: assert False, f"Unsupported torch memory dtype: {config_options['variant']}"
                 self.log_reload_reason("Pipeline memory type changed")
         else:
-            if self.variant != "fp16":
-                self.variant = "fp16"
+            if self.last["variant"] != "fp16":
+                self.last["variant"] = "fp16"
                 self.log_reload_reason("Pipeline memory type changed")
 
-        if request.SchedulerType != self.scheduler:
-            self.scheduler = request.SchedulerType
+        if request.SchedulerType != self.last["scheduler"]:
+            self.last["scheduler"] = { "scheduler": request.SchedulerType }
             self.log_reload_reason("Scheduler changed")
 
         if request.LoraAdapters:
-            if len(self.loras.keys()) == 0 and len(request.LoraAdapters) == 0:
+            if (self.last["loras"] is None or len(self.last["loras"].keys()) == 0) and len(request.LoraAdapters) == 0:
                 pass
-            elif len(self.loras.keys()) != len(request.LoraAdapters):
+            elif len(self.last["loras"].keys()) != len(request.LoraAdapters):
                 self.log_reload_reason("LoRAs changed")
             else:
-                for adapter in self.loras.keys():
+                for adapter in self.last["loras"].keys():
                     if adapter not in request.LoraAdapters:
                         self.log_reload_reason("LoRAs changed")
                         break
             if self.needs_reload:
-                self.loras = {}
+                self.last["loras"] = {}
                 if len(request.LoraAdapters) > 0:
                     i = 0
                     for adapter in request.LoraAdapters:
-                        self.loras[adapter] = request.LoraScales[i]
+                        self.last["loras"][adapter] = request.LoraScales[i]
                         i += 1
 
-        if len(request.ControlNet) > 0 and request.ControlNet != self.controlnet:
-            self.controlnet = request.ControlNet
+        if len(request.ControlNet) > 0 and request.ControlNet != self.last["controlnet"]:
+            self.last["controlnet"] = request.ControlNet
             self.log_reload_reason("ControlNet changed")
 
-        if self.clip_skip != request.CLIPSkip:
-            self.clip_skip = request.CLIPSkip
+        if self.last["clip_skip"] != request.CLIPSkip:
+            self.last["clip_skip"] = request.CLIPSkip
 
-        if self.low_vram != request.LowVRAM:
-            self.low_vram = request.LowVRAM
+        if self.last["low_vram"] != request.LowVRAM:
+            self.last["low_vram"] = request.LowVRAM
             self.log_reload_reason("Low VRAM changed")
 
         return backend_pb2.Result(message="", success=True)
 
 
     def GenerateImage(self, request, context):
-        if request.height != self.height or request.width != self.width:
+        if request.height != self.last["height"] or request.width != self.last["width"]:
             self.log_reload_reason("Resolution changed")
-            self.height = request.height
-            self.width = request.width
+            self.last["height"] = request.height
+            self.last["width"] = request.width
 
         if not self.loaded or self.needs_reload:
             if self.process_type == "asyncdiff":
-                logging.info("Using AsyncDiff host for pipeline type: " + self.type)
+                logging.info("Using AsyncDiff host for pipeline type: " + self.last["type"])
                 assert self.nproc_per_node > 1, "AsyncDiff requires at least 2 GPUs."
                 assert self.nproc_per_node < 6, "AsyncDiff does not support more than 5 GPUs. You can set a limit using CUDA_VISIBLE_DEVICES."
                 self.launch_host("asyncdiff")
 
             elif self.process_type == "distrifuser":
-                logging.info("Using DistriFuser host for pipeline type: " + self.type)
+                logging.info("Using DistriFuser host for pipeline type: " + self.last["type"])
                 self.launch_host("distrifuser")
 
             elif self.process_type == "xdit":
-                logging.info("Using xDiT host for pipeline type: " + self.type)
+                logging.info("Using xDiT host for pipeline type: " + self.last["type"])
                 self.launch_host("xdit")
 
         if self.loaded:
-            url = f"{URL}/generate"
+            url = f"http://localhost:{port}/generate"
 
-            if self.type in ["svd"]:
+            if self.last["type"] in ["svd"]:
                 data = {
                     "image":                request.src,
                     "decode_chunk_size":    int(config_options["chunk_size"]),
@@ -274,21 +284,21 @@ class BackendServicer(backend_pb2_grpc.BackendServicer):
                     "noise_aug_strength":   float(config_options["noise_aug_strength"]),
                 }
 
-            elif self.type in ["sdup"]:
+            elif self.last["type"] in ["sdup"]:
                 data = {
                     "image":                request.src,
                 }
 
             else:
                 data = {
-                    "clip_skip":            int(self.clip_skip),
+                    "clip_skip":            int(self.last["clip_skip"]),
                 }
 
-            data["cfg"]     = float(self.cfg_scale)
+            data["cfg"]     = float(self.last["cfg_scale"])
             data["seed"]    = int(request.seed)
             data["steps"]   = int(request.step)
-            if request.positive_prompt: data["positive"] = request.positive_prompt
-            if request.negative_prompt: data["negative"] = request.negative_prompt
+            if request.positive_prompt is not None: data["positive"] = request.positive_prompt
+            if request.negative_prompt is not None: data["negative"] = request.negative_prompt
 
             logger.info("Sending request to {url} with params:\n" + str(data))
             try:
@@ -331,30 +341,30 @@ class BackendServicer(backend_pb2_grpc.BackendServicer):
 
 
     def launch_host(self, name):
-        global process, config_options, config_global, NON_ARG_OPTIONS
-        cmd = ['torchrun', f'--nproc_per_node={self.nproc_per_node}', f'--master-port={config_global["master_port"]}', f'host_{name}.py']
+        global process, config_options, NON_ARG_OPTIONS
+        cmd = ['torchrun', f'--nproc_per_node={self.nproc_per_node}', f'--master-port={master_port}', f'multigpu_diffusion/host_{name}.py']
 
         # generic
-        cmd.append(f'--port={config_global["port"]}')
-        cmd.append(f'--model={self.model}')
-        cmd.append(f'--type={self.type}')
-        cmd.append(f'--height={self.height}')
-        cmd.append(f'--width={self.width}')
+        cmd.append(f'--port={port}')
+        cmd.append(f'--model={self.last["model"]}')
+        cmd.append(f'--type={self.last["type"]}')
+        cmd.append(f'--height={self.last["height"]}')
+        cmd.append(f'--width={self.last["width"]}')
         for k, v in config_options.items():
             if k not in NON_ARG_OPTIONS:
                 if len(v) > 0:  cmd.append(f'--{k}={v}')
                 else:           cmd.append(f'--{k}')
 
-        if self.controlnet is not None:                                                         cmd.append(f'--control_net={self.controlnet}')
-        if len(self.loras) > 0:                                                                 cmd.append(f'--lora={json.dumps(self.loras)}')
-        if self.scheduler is not None and self.type in ['sd1', 'sd2', 'sd3', 'sdup', 'sdxl']:   cmd.append(f'--scheduler={self.scheduler}')
+        if self.last["controlnet"] is not None:                                                                 cmd.append(f'--control_net={self.last["controlnet"]}')
+        if self.last["loras"] is not None and len(self.last["loras"]) > 0:                                      cmd.append(f'--lora={json.dumps(self.last["loras"])}')
+        if self.last["scheduler"] is not None and self.last["type"] in ['sd1', 'sd2', 'sd3', 'sdup', 'sdxl']:   cmd.append(f'--scheduler={json.dumps(self.last["scheduler"])}')
 
         kill_process()
 
         global process
         logger.info("Starting torch instance:\n" + str(cmd))
         process = subprocess.Popen(cmd, stdout=sys.stdout, stderr=subprocess.STDOUT)
-        initialize_url = f"{URL}/initialize"
+        initialize_url = f"http://localhost:{port}/initialize"
         time_elapsed = 0
         while True:
             time.sleep(5)
@@ -367,12 +377,12 @@ class BackendServicer(backend_pb2_grpc.BackendServicer):
                     logger.info("Torch instance started successfully")
                     return
             except requests.exceptions.RequestException:
-                if time_elapsed > config_global["host_init_timeout"]:
+                if time_elapsed > host_init_timeout:
                     kill_process()
-                    self.log_reload_reason('Torch instance start has timed out (config_global["host_init_timeout"]s)')
-                    return backend_pb2.Result(message=f'Failed to launch host within {config_global["host_init_timeout"]} seconds', success=False)
+                    self.log_reload_reason(f'Torch instance start has timed out ({host_init_timeout}s)')
+                    return backend_pb2.Result(message=f'Failed to launch host within {host_init_timeout} seconds', success=False)
                 else:
-                    logger.info(f'Waiting on torch instance init ({time_elapsed}s/{config_global["host_init_timeout"]}s)')
+                    logger.info(f'Waiting on torch instance init ({time_elapsed}s/{host_init_timeout}s)')
 
 
 def serve(address):
@@ -404,6 +414,6 @@ def serve(address):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run the gRPC server.")
-    parser.add_argument("--addr", default=f'localhost:{config_global["grpc_port"]}', help="The address to bind the server to.")
+    parser.add_argument("--addr", default=f'localhost:{grpc_port}', help="The address to bind the server to.")
     args = parser.parse_args()
     serve(args.addr)
