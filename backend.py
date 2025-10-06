@@ -66,6 +66,7 @@ NON_ARG_OPTIONS = [
     "grpc_port",
     "master_port",
     "cuda_devices",
+    "nproc_per_node",
     "backend",
     "frames",
     "video_output_type",
@@ -147,10 +148,17 @@ class BackendServicer(backend_pb2_grpc.BackendServicer):
             else:
                 config_options[opt] = ""
 
-        if config_options.get("port") is not None:  port = int(config_options["port"])
+        if config_options.get("port") is not None:
+            global port
+            port = int(config_options["port"])
         # if config_options.get("grpc_port") is not None: grpc_port = int(config_options["grpc_port"])
-        if config_options.get("master_port") is not None: master_port = int(config_options["master_port"])
-        if config_options.get("cuda_devices") is not None: os.environ["CUDA_VISIBLE_DEVICES"] = config_options["cuda_devices"]
+        if config_options.get("master_port") is not None:
+            global master_port
+            master_port = int(config_options["master_port"])
+        if config_options.get("cuda_devices") is not None:
+            os.environ["CUDA_VISIBLE_DEVICES"] = config_options["cuda_devices"]
+        if config_options.get("nproc_per_node") is not None:
+            self.nproc_per_node = int(config_options["nproc_per_node"])
 
         if config_options.get("backend"):
             match config_options["backend"]:
@@ -222,7 +230,7 @@ class BackendServicer(backend_pb2_grpc.BackendServicer):
         if request.LoraAdapters:
             if (self.last["loras"] is None or len(self.last["loras"].keys()) == 0) and len(request.LoraAdapters) == 0:
                 pass
-            elif len(self.last["loras"].keys()) != len(request.LoraAdapters):
+            elif self.last["loras"] is None and len(request.LoraAdapters) > 0 or len(self.last["loras"].keys()) != len(request.LoraAdapters):
                 self.log_reload_reason("LoRAs changed")
             else:
                 for adapter in self.last["loras"].keys():
