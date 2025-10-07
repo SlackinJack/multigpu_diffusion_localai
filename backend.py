@@ -73,6 +73,7 @@ NON_ARG_OPTIONS = [
     "chunk_size",
     "motion_bucket_id",
     "noise_aug_strength",
+    "scheduler_args",
 ]
 
 
@@ -143,15 +144,13 @@ class BackendServicer(backend_pb2_grpc.BackendServicer):
         for opt in options:
             if ":" in opt:
                 o = opt.split(":")
-                assert len(o) == 2, "Malformed option: " + opt
-                config_options[o[0]] = o[1]
+                config_options[o[0]] = opt.replace(f"{o[0]}:", "", 1)
             else:
                 config_options[opt] = ""
 
         if config_options.get("port") is not None:
             global port
             port = int(config_options["port"])
-        # if config_options.get("grpc_port") is not None: grpc_port = int(config_options["grpc_port"])
         if config_options.get("master_port") is not None:
             global master_port
             master_port = int(config_options["master_port"])
@@ -226,6 +225,13 @@ class BackendServicer(backend_pb2_grpc.BackendServicer):
         if request.SchedulerType != self.last["scheduler"]:
             self.last["scheduler"] = { "scheduler": request.SchedulerType }
             self.log_reload_reason("Scheduler changed")
+
+        if config_options.get("scheduler_args") is not None:
+            if self.last.get("scheduler") is None:
+                self.last["scheduler"] = {}
+            scheduler_args = config_options.get("scheduler_args")
+            for k,v in json.loads(scheduler_args).items():
+                self.last["scheduler"][k] = v
 
         if request.LoraAdapters:
             if (self.last["loras"] is None or len(self.last["loras"].keys()) == 0) and len(request.LoraAdapters) == 0:
