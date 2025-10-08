@@ -18,8 +18,8 @@ from concurrent import futures
 from diffusers.utils import export_to_video, export_to_gif
 
 
-os.environ["TORCH_NCCL_BLOCKING_WAIT"] = "1"
-os.environ["TORCH_NCCL_ASYNC_ERROR_HANDLING"] = "1"
+#os.environ["TORCH_NCCL_BLOCKING_WAIT"] = "1"
+#os.environ["TORCH_NCCL_ASYNC_ERROR_HANDLING"] = "1"
 #os.environ["NCCL_SHM_DISABLE"] = "1"
 #os.environ["NCCL_DEBUG"] = "INFO"
 #os.environ["NCCL_P2P_DISABLE"] = "0"
@@ -92,8 +92,8 @@ process = None
 def kill_process():
     global process
     if process is not None:
-        process.terminate()
-        time.sleep(15)
+        process.kill()
+        time.sleep(3)
         process = None
 
 
