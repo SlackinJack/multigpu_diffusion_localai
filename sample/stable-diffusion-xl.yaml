@@ -1,21 +1,32 @@
+#
 name: stable-diffusion-xl
 backend: multigpu_diffusion
 parameters:
-    model: relative/path/to/stable-diffusion-xl
+    model: relative/path/to/sdxl
 diffusers:
     pipeline_type: sdxl
-    scheduler_type: dpmpp_2m_sde
-    cfg_scale: 6.0
+    scheduler_type: ddim
+cfg_scale: 7.0
 options:
     # generic
+    - "port:6000"
+    - "master_port:29400"
+    - "cuda_devices:0,1,2,3"
+    - "nproc_per_node:4"
     - "backend:asyncdiff"
     - "variant:fp16"
     #- "gguf_model:"
-    - "compel"
-    - "compile_unet"
-    - "compile_vae"
-    - "compile_text_encoder"
-    #- "quantize_to:int8"
+    #- "compel"
+    #- "compile_unet"
+    #- "compile_vae"
+    #- "compile_encoder"
+    #- "compile_backend:eager" #inductor"
+    #- "compile_mode:max-autotune-no-cudagraphs"
+    #- 'compile_options:{"triton.cudagraphs": true}'
+    #- "compile_fullgraph_off"
+    #- "quantize_unet_to:int8"
+    #- "quantize_encoder_to:int8"
+    #- "quantize_misc_to:int8"
     #- "enable_vae_tiling"
     #- "enable_vae_slicing"
     #- "xformers_efficient"
@@ -25,11 +36,12 @@ options:
     #- "chunk_size:8"
     #- "motion_bucket_id:180"
     #- "noise_aug_strength:0.01"
-    - "warm_up_steps:20"
+    #- "warm_up_steps:20"
     #- "image_scale:100"
+    #- 'scheduler_args:{"timestep_spacing": "trailing", "use_karras_sigmas": true}'
 
     # asyncdiff
-    - "time_shift=true"
+    #- "time_shift"
     - "model_n:3"
     - "stride:2"
 
@@ -37,7 +49,7 @@ options:
     #- "sync_mode:corrected_async_gn"
     #- "parallelism:patch"
     #- "split_scheme:row"
-    ##- "no_split_batch"
+    #- "no_split_batch"
     #- "no_cuda_graph"
 
     # xdit
@@ -47,7 +59,3 @@ options:
     #- "ulysses_degree:1"
     #- "ring_degree:1"
     ##- "use_cfg_parallel"
-lora_adapters:
-    - /absolute/path/to/lora.safetensors
-lora_scales:
-    - 1.00

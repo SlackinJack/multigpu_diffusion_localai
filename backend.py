@@ -18,49 +18,7 @@ from concurrent import futures
 from diffusers.utils import export_to_video, export_to_gif
 
 
-#os.environ["TORCH_NCCL_BLOCKING_WAIT"] = "1"
-#os.environ["TORCH_NCCL_ASYNC_ERROR_HANDLING"] = "1"
-#os.environ["NCCL_SHM_DISABLE"] = "1"
-#os.environ["NCCL_DEBUG"] = "INFO"
-#os.environ["NCCL_P2P_DISABLE"] = "0"
-
-
-config              =   json.load(open("multigpu_diffusion/config.json"))
 config_options      =   {}
-"""
-    GENERIC OPTIONS
-        variant
-        compel
-        compile_unet
-        compile_vae
-        compile_text_encoder
-        quantize_encoder
-        quantize_encoder_type
-        enable_vae_tiling
-        enable_vae_slicing
-        xformers_efficient
-        warm_up_steps
-
-    ASYNCDIFF OPTIONS
-        time_shift
-        model_n
-        stride
-
-    DISTRIFUSER OPTIONS
-        sync_mode
-        parallelism
-        split_scheme
-        no_split_batch
-        no_cuda_graph
-
-    XDIT OPTIONS
-        pipefusion_parallel_degree
-        tensor_parallel_degree
-        data_parallel_degree
-        ulysses_degree
-        ring_degree
-        use_cfg_parallel
-"""
 NON_ARG_OPTIONS = [
     "port",
     "grpc_port",
@@ -95,16 +53,15 @@ def kill_process():
         process.kill()
         time.sleep(3)
         process = None
+    return
 
 
 def setup_logger():
     global logger
-    logging.basicConfig(
-        level=logging.INFO,
-        format=f"[LocalAI Backend] %(asctime)s - %(levelname)s - %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
-    logger = logging.getLogger(__name__)
+    logging.root.setLevel(logging.NOTSET)
+    logging.basicConfig(format=f"[LocalAI Backend] %(message)s")
+    logger = logging.getLogger(":")
+    return
 
 
 # Implement the BackendServicer class with the service methods
