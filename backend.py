@@ -223,10 +223,10 @@ class BackendServicer(backend_pb2_grpc.BackendServicer):
 
 
     def GenerateImage(self, request, context):
-        if request.height != self.last["height"] or request.width != self.last["width"]:
-            self.log_reload_reason("Resolution changed")
-            self.last["height"] = request.height
-            self.last["width"] = request.width
+        if self.process_type == "distrifuser" and (request.height != self.last["height"] or request.width != self.last["width"]):
+            self.log_reload_reason("Resolution changed on Distrifuser host")
+        self.last["height"] = request.height
+        self.last["width"] = request.width
 
         if not self.loaded or self.needs_reload:
             if self.process_type == "asyncdiff":
@@ -264,6 +264,10 @@ class BackendServicer(backend_pb2_grpc.BackendServicer):
                 data = {
                     "clip_skip":            int(self.last["clip_skip"]),
                 }
+
+            if self.process_type != "distrifuser" and self.last["type"] not in ["sdup"]:
+                data["height"] = self.last["height"]
+                data["width"] = self.last["width"]
 
             data["cfg"]     = float(self.last["cfg_scale"])
             data["seed"]    = int(request.seed)
