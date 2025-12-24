@@ -1,61 +1,82 @@
-#
 name: stable-diffusion-xl
 backend: multigpu_diffusion
 parameters:
-    model: relative/path/to/sdxl
+    model: relative/path/to/stable-diffusion-xl
 diffusers:
     pipeline_type: sdxl
-    scheduler_type: ddim
-cfg_scale: 7.0
+    scheduler_type: heun
+    cfg_scale: 6.0
 options:
-    # generic
-    - "port:6000"
-    - "master_port:29400"
+    # models
+    # - "unet:"
+    # - "unet_config:"
+    # - "transformer:/absolute/path/to/transformer.safetensors"
+    # - "transformer_config:/absolute/path/to/checkpoint/transformer/config.json"
+    # - "vae:"
+    # - "vae_config:"
+    # - "motion_module:"
+    # - "motion_adapter:"
+    # - "motion_lora:"
+    # - "motion_config:"
+    # - "control_net:"
+    # - "control_net_config:"
+
+    # image
+    # - 'scheduler_args:{"timestep_spacing": "trailing", "use_karras_sigmas": true}'
+
+    # video
+    # - "video_output_type:gif"
+    # - "frames:25"
+    # - "chunk_size:8"
+    # - "motion_bucket_id:180"
+    # - "noise_aug_strength:0.01"
+
+    # optimization
+    # - "torch_cache_limit:0"
+    # - "torch_accumlated_cache_limit:0"
+    # - "torch_capture_scalar"
+    # - "compile_unet"
+    # - "compile_vae"
+    # - "compile_encoder"
+    # - "compile_backend:inductor" #eager
+    # - "compile_mode:max-autotune-no-cudagraphs"
+    # - 'compile_options:{"triton.cudagraphs": true}'
+    # - "compile_fullgraph_off" # NOTE: required for 0-size cache limit
+    # - "quantize_unet:bnb,int4,fp16,int1,nf4"
+    # - "quantize_encoder:bnb,int4,fp16,int1,nf4" # NOTE: some text-encoder loras require this off
+    # - "quantize_vae:tao,uint1wo"
+    # - "quantize_tokenizer:tao,uint1wo"
+    # - "quantize_scheduler:tao,uint1wo"
+    # - "quantize_misc:tao,uint1wo"
+    - "enable_vae_tiling"
+    - "enable_vae_slicing"
+    # - "xformers_efficient"
+
+    # host
+    - "port:51290" # NOTE: randomize this
+    - "master_port:29400" # NOTE: randomize this
     - "cuda_devices:0,1,2,3"
     - "nproc_per_node:4"
     - "backend:asyncdiff"
     - "variant:fp16"
-    #- "gguf_model:"
-    #- "compel"
-    #- "compile_unet"
-    #- "compile_vae"
-    #- "compile_encoder"
-    #- "compile_backend:eager" #inductor"
-    #- "compile_mode:max-autotune-no-cudagraphs"
-    #- 'compile_options:{"triton.cudagraphs": true}'
-    #- "compile_fullgraph_off"
-    #- "quantize_unet_to:int8"
-    #- "quantize_encoder_to:int8"
-    #- "quantize_misc_to:int8"
-    #- "enable_vae_tiling"
-    #- "enable_vae_slicing"
-    #- "xformers_efficient"
-    #- "frames:25"
-    #- "video_output_type:gif"
-    #- "controlnet_scale:1.0"
-    #- "chunk_size:8"
-    #- "motion_bucket_id:180"
-    #- "noise_aug_strength:0.01"
-    #- "warm_up_steps:20"
-    #- "image_scale:100"
-    #- 'scheduler_args:{"timestep_spacing": "trailing", "use_karras_sigmas": true}'
+    # - "warm_up_steps:20"
+    # - "compel"
 
-    # asyncdiff
-    #- "time_shift"
+    # asyncdiff host
+    - "time_shift"
     - "model_n:3"
     - "stride:2"
+    # - "synced_steps:1"
+    - "synced_percent:12.5"
 
-    # distrifuser
-    #- "sync_mode:corrected_async_gn"
-    #- "parallelism:patch"
-    #- "split_scheme:row"
-    #- "no_split_batch"
-    #- "no_cuda_graph"
-
-    # xdit
-    #- "pipefusion_parallel_degree:4"
-    #- "tensor_parallel_degree:1"
-    #- "data_parallel_degree:1"
-    #- "ulysses_degree:1"
-    #- "ring_degree:1"
-    ##- "use_cfg_parallel"
+    # xdit host
+    # - "pipefusion_parallel_degree:4"
+    # - "tensor_parallel_degree:1"
+    # - "data_parallel_degree:1"
+    # - "ulysses_degree:1"
+    # - "ring_degree:1"
+    # - "use_cfg_parallel"
+lora_adapters:
+    - /absolute/path/to/lora.safetensors
+lora_scales:
+    - 1.00

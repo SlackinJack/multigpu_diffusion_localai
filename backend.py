@@ -46,6 +46,10 @@ _ONE_DAY_IN_SECONDS = 60 * 60 * 24
 MAX_WORKERS = int(os.environ.get('PYTHON_GRPC_MAX_WORKERS', '1'))
 
 
+ASYNCDIFF_SUPPORTED_MODEL_TYPES = ["ad", "flux", "flux2", "sd1", "sd2", "sd3", "sdup", "sdxl", "svd", "zimage"]
+XDIT_SUPPORTED_MODEL_TYPES = ["flux", "sd3"]
+
+
 process = None
 def kill_process():
     global process
@@ -59,8 +63,8 @@ def kill_process():
 def setup_logger():
     global logger
     logging.root.setLevel(logging.NOTSET)
-    logging.basicConfig(format=f"[LocalAI Backend] %(message)s")
-    logger = logging.getLogger(":")
+    logging.basicConfig(level=logging.INFO)
+    logger = logging.getLogger("[LocalAI Backend]")
     return
 
 
@@ -122,10 +126,6 @@ class BackendServicer(backend_pb2_grpc.BackendServicer):
                     if self.process_type != "asyncdiff":
                         self.log_reload_reason(f"Host type changed to AsyncDiff with {self.nproc_per_node} GPUs")
                         self.process_type = "asyncdiff"
-                case "distrifuser":
-                    if self.process_type != "distrifuser":
-                        self.log_reload_reason(f"Host type changed to DistriFuser with {self.nproc_per_node} GPUs")
-                        self.process_type = "distrifuser"
                 case "xdit":
                     if self.process_type != "xdit":
                         self.log_reload_reason(f"Host type changed to xDiT with {self.nproc_per_node} GPUs")
@@ -134,17 +134,12 @@ class BackendServicer(backend_pb2_grpc.BackendServicer):
                     assert False, f"Unknown backend: {config_options['backend']}"
         else:
             # detect host to use
-            if self.last["type"] in ["sd1", "sd2", "sdxl"] and not (self.nproc_per_node > 2 and request.LoraAdapters):
-                # distrifuser
-                if self.process_type != "distrifuser":
-                    self.log_reload_reason(f"Host type changed to DistriFuser with {self.nproc_per_node} GPUs")
-                    self.process_type = "distrifuser"
-            elif self.last["type"] in ["flux", "sd3"]:
+            if self.last["type"] in XDIT_SUPPORTED_MODEL_TYPES:
                 # xdit
                 if self.process_type != "xdit":
                     self.log_reload_reason(f"Host type changed to xDiT with {self.nproc_per_node} GPUs")
                     self.process_type = "xdit"
-            elif self.last["type"] in ["ad", "sd1", "sd2", "sd3", "sdup", "sdxl", "svd"]:
+            elif self.last["type"] in ASYNCDIFF_SUPPORTED_MODEL_TYPES:
                 # asyncdiff
                 if self.process_type != "asyncdiff":
                     self.log_reload_reason(f"Host type changed to AsyncDiff with {self.nproc_per_node} GPUs")
@@ -156,7 +151,7 @@ class BackendServicer(backend_pb2_grpc.BackendServicer):
             self.log_reload_reason("Pipeline type changed")
         self.last["type"] = request.PipelineType
 
-        if request.CFGScale > 0 and self.last["cfg_scale"] != request.CFGScale:
+        if request.CFGScale > -0.1 and self.last["cfg_scale"] != request.CFGScale:
             self.last["cfg_scale"] = request.CFGScale
 
         if request.Model != self.last["model"] or (len(request.ModelFile) > 0 and os.path.exists(request.ModelFile) and request.ModelFile != self.last["model"]):
@@ -179,7 +174,7 @@ class BackendServicer(backend_pb2_grpc.BackendServicer):
                 self.last["variant"] = "fp16"
                 self.log_reload_reason("Pipeline memory type changed")
 
-        if request.SchedulerType != self.last["scheduler"]:
+        if request.SchedulerType != self.last["scheduler"] and len(request.SchedulerType) > 0:
             self.last["scheduler"] = { "scheduler": request.SchedulerType }
             self.log_reload_reason("Scheduler changed")
 
@@ -223,8 +218,6 @@ class BackendServicer(backend_pb2_grpc.BackendServicer):
 
 
     def GenerateImage(self, request, context):
-        if self.process_type == "distrifuser" and (request.height != self.last["height"] or request.width != self.last["width"]):
-            self.log_reload_reason("Resolution changed on Distrifuser host")
         self.last["height"] = request.height
         self.last["width"] = request.width
 
@@ -234,11 +227,6 @@ class BackendServicer(backend_pb2_grpc.BackendServicer):
                 assert self.nproc_per_node > 1, "AsyncDiff requires at least 2 GPUs."
                 assert self.nproc_per_node < 6, "AsyncDiff does not support more than 5 GPUs. You can set a limit using CUDA_VISIBLE_DEVICES."
                 self.launch_host("asyncdiff")
-
-            elif self.process_type == "distrifuser":
-                logging.info("Using DistriFuser host for pipeline type: " + self.last["type"])
-                self.launch_host("distrifuser")
-
             elif self.process_type == "xdit":
                 logging.info("Using xDiT host for pipeline type: " + self.last["type"])
                 self.launch_host("xdit")
@@ -265,7 +253,7 @@ class BackendServicer(backend_pb2_grpc.BackendServicer):
                     "clip_skip":            int(self.last["clip_skip"]),
                 }
 
-            if self.process_type != "distrifuser" and self.last["type"] not in ["sdup"]:
+            if self.last["type"] not in ["sdup"]:
                 data["height"] = self.last["height"]
                 data["width"] = self.last["width"]
 
@@ -275,7 +263,7 @@ class BackendServicer(backend_pb2_grpc.BackendServicer):
             if request.positive_prompt is not None: data["positive"] = request.positive_prompt
             if request.negative_prompt is not None: data["negative"] = request.negative_prompt
 
-            logger.info("Sending request to {url} with params:\n" + str(data))
+            logger.info(f"Sending request to {url} with params:\n" + str(data))
             try:
                 response = requests.post(url, json=data)
                 response_data = response.json()
@@ -323,16 +311,18 @@ class BackendServicer(backend_pb2_grpc.BackendServicer):
         cmd.append(f'--port={port}')
         cmd.append(f'--checkpoint={self.last["model"]}')
         cmd.append(f'--type={self.last["type"]}')
-        cmd.append(f'--height={self.last["height"]}')
-        cmd.append(f'--width={self.last["width"]}')
         for k, v in config_options.items():
             if k not in NON_ARG_OPTIONS:
                 if len(v) > 0:  cmd.append(f'--{k}={v}')
                 else:           cmd.append(f'--{k}')
 
-        if self.last["controlnet"] is not None:                                                                 cmd.append(f'--control_net={self.last["controlnet"]}')
-        if self.last["loras"] is not None and len(self.last["loras"]) > 0:                                      cmd.append(f'--lora={json.dumps(self.last["loras"])}')
-        if self.last["scheduler"] is not None and self.last["type"] in ['sd1', 'sd2', 'sd3', 'sdup', 'sdxl']:   cmd.append(f'--scheduler={json.dumps(self.last["scheduler"])}')
+        if self.last["controlnet"] is not None:
+            cmd.append(f'--control_net={self.last["controlnet"]}')
+        if self.last["loras"] is not None and len(self.last["loras"]) > 0:
+            cmd.append(f'--lora={json.dumps(self.last["loras"])}')
+        if self.last["scheduler"] is not None:
+            if self.last["type"] in ['flux', 'sd1', 'sd2', 'sd3', 'sdup', 'sdxl', 'zimage']:
+                cmd.append(f'--scheduler={json.dumps(self.last["scheduler"])}')
 
         kill_process()
 
